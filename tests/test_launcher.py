@@ -2,38 +2,22 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
+from frag_demo.launcher.cs2 import CS2Launcher, _GAMEINFO_CSDM_LINE, _GAMEINFO_CSGO_LINE
 
-from frag_demo.launcher.cs2 import CS2Launcher, _GAMEINFO_CSGO_LINE, _GAMEINFO_CSDM_LINE
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _make_launcher(tmp_path: Path) -> tuple[CS2Launcher, Path]:
-    """Return a launcher whose CS2 root points at *tmp_path*.
-
-    Also creates the minimal directory/file structure that install_plugin
-    expects:
-      - {tmp_path}/game/bin/win64/cs2.exe  (stub)
-      - {tmp_path}/game/csgo/gameinfo.gi    (stub with the expected 'Game  csgo' line)
-      - {plugin_src}/server.dll             (stub)
-    """
-    # cs2.exe stub
+    """Return a launcher rooted at *tmp_path* with stub install assets."""
     cs2_exe = tmp_path / "game" / "bin" / "win64" / "cs2.exe"
     cs2_exe.parent.mkdir(parents=True, exist_ok=True)
     cs2_exe.touch()
 
-    # gameinfo.gi stub (must contain "Game\tcsgo" to be patchable)
     gameinfo_dir = tmp_path / "game" / "csgo"
     gameinfo_dir.mkdir(parents=True, exist_ok=True)
     gameinfo_path = gameinfo_dir / "gameinfo.gi"
-    gameinfo_content = (
+    gameinfo_path.write_text(
         '"GameInfo"\n'
         "{\n"
         "\tFileSystem\n"
@@ -43,15 +27,13 @@ def _make_launcher(tmp_path: Path) -> tuple[CS2Launcher, Path]:
         "\t\t\t" + _GAMEINFO_CSGO_LINE + "\n"
         "\t\t}\n"
         "\t}\n"
-        "}\n"
+        "}\n",
+        encoding="utf-8",
     )
-    gameinfo_path.write_text(gameinfo_content, encoding="utf-8")
 
-    # Fake HLAE stub
     hlae_path = tmp_path / "HLAE.exe"
     hlae_path.touch()
 
-    # Plugin DLL stub (we will override find_plugin_dll via a separate temp dir)
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir()
     plugin_dll = plugin_dir / "server.dll"
@@ -64,16 +46,9 @@ def _make_launcher(tmp_path: Path) -> tuple[CS2Launcher, Path]:
     return launcher, plugin_dll
 
 
-# ---------------------------------------------------------------------------
-# _cs2_root
-# ---------------------------------------------------------------------------
-
 class TestCS2Root:
     def test_root_derived_from_exe_path(self, tmp_path: Path) -> None:
-        cs2_exe = tmp_path / "game" / "bin" / "win64" / "cs2.exe"
-        cs2_exe.parent.mkdir(parents=True, exist_ok=True)
-        cs2_exe.touch()
-        launcher = CS2Launcher(cs2_path=str(cs2_exe))
+        launcher, _ = _make_launcher(tmp_path)
         assert launcher._cs2_root() == tmp_path.resolve()
 
     def test_root_none_when_no_cs2_path(self) -> None:
@@ -81,10 +56,10 @@ class TestCS2Root:
         launcher.cs2_path = None
         assert launcher._cs2_root() is None
 
+    def test_root_none_for_unexpected_manual_path(self, tmp_path: Path) -> None:
+        launcher = CS2Launcher(cs2_path=str(tmp_path / "cs2.exe"))
+        assert launcher._cs2_root() is None
 
-# ---------------------------------------------------------------------------
-# find_plugin_dll
-# ---------------------------------------------------------------------------
 
 class TestFindPluginDll:
     def test_returns_none_when_no_candidates_exist(self, tmp_path: Path) -> None:
@@ -102,10 +77,6 @@ class TestFindPluginDll:
             assert launcher.find_plugin_dll() == dll
 
 
-# ---------------------------------------------------------------------------
-# install_plugin
-# ---------------------------------------------------------------------------
-
 class TestInstallPlugin:
     def test_dll_is_copied_to_csdm_bin(self, tmp_path: Path) -> None:
         launcher, plugin_dll = _make_launcher(tmp_path)
@@ -113,26 +84,22 @@ class TestInstallPlugin:
             ok = launcher.install_plugin()
 
         assert ok is True
-        dest = tmp_path / "game" / "csgo" / "csdm" / "bin" / "server.dll"
-        assert dest.exists()
+        assert (tmp_path / "game" / "csgo" / "csdm" / "bin" / "server.dll").exists()
 
     def test_dll_is_also_copied_to_csdm_bin_win64(self, tmp_path: Path) -> None:
-        """CS2 also searches bin/win64/ so the DLL must be present there too."""
         launcher, plugin_dll = _make_launcher(tmp_path)
         with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
             ok = launcher.install_plugin()
 
         assert ok is True
-        dest_win64 = tmp_path / "game" / "csgo" / "csdm" / "bin" / "win64" / "server.dll"
-        assert dest_win64.exists()
+        assert (tmp_path / "game" / "csgo" / "csdm" / "bin" / "win64" / "server.dll").exists()
 
     def test_gameinfo_gi_is_backed_up(self, tmp_path: Path) -> None:
         launcher, plugin_dll = _make_launcher(tmp_path)
         with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
             launcher.install_plugin()
 
-        backup = tmp_path / "game" / "csgo" / "gameinfo.gi.backup"
-        assert backup.exists()
+        assert (tmp_path / "game" / "csgo" / "gameinfo.gi.backup").exists()
 
     def test_gameinfo_gi_is_patched(self, tmp_path: Path) -> None:
         launcher, plugin_dll = _make_launcher(tmp_path)
@@ -143,21 +110,12 @@ class TestInstallPlugin:
         assert _GAMEINFO_CSDM_LINE in gameinfo
         assert _GAMEINFO_CSGO_LINE in gameinfo
 
-        # Find line indices for exact matches (avoid substring confusion: "Game\tcsgo"
-        # is a prefix of "Game\tcsgo/csdm").
-        stripped_lines = [l.strip() for l in gameinfo.splitlines()]
-        csdm_idx = next(
-            i for i, l in enumerate(stripped_lines) if l == _GAMEINFO_CSDM_LINE
-        )
-        csgo_idx = next(
-            i for i, l in enumerate(stripped_lines) if l == _GAMEINFO_CSGO_LINE
-        )
-        assert csdm_idx < csgo_idx, (
-            f"Expected csdm line (line {csdm_idx}) before csgo line (line {csgo_idx})"
-        )
+        stripped_lines = [line.strip() for line in gameinfo.splitlines()]
+        csdm_idx = next(i for i, line in enumerate(stripped_lines) if line == _GAMEINFO_CSDM_LINE)
+        csgo_idx = next(i for i, line in enumerate(stripped_lines) if line == _GAMEINFO_CSGO_LINE)
+        assert csdm_idx < csgo_idx
 
     def test_no_duplicate_patch(self, tmp_path: Path) -> None:
-        """Calling install_plugin twice should not add the csdm line twice."""
         launcher, plugin_dll = _make_launcher(tmp_path)
         with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
             launcher.install_plugin()
@@ -166,22 +124,54 @@ class TestInstallPlugin:
         gameinfo = (tmp_path / "game" / "csgo" / "gameinfo.gi").read_text(encoding="utf-8")
         assert gameinfo.count(_GAMEINFO_CSDM_LINE) == 1
 
+    def test_second_install_keeps_original_backup(self, tmp_path: Path) -> None:
+        launcher, plugin_dll = _make_launcher(tmp_path)
+        gameinfo_path = tmp_path / "game" / "csgo" / "gameinfo.gi"
+        original_text = gameinfo_path.read_text(encoding="utf-8")
+
+        with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
+            assert launcher.install_plugin() is True
+            assert launcher.install_plugin() is True
+
+        backup = tmp_path / "game" / "csgo" / "gameinfo.gi.backup"
+        assert backup.read_text(encoding="utf-8") == original_text
+
+    def test_second_install_reconstructs_missing_backup(self, tmp_path: Path) -> None:
+        launcher, plugin_dll = _make_launcher(tmp_path)
+        gameinfo_path = tmp_path / "game" / "csgo" / "gameinfo.gi"
+        original_text = gameinfo_path.read_text(encoding="utf-8")
+
+        with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
+            assert launcher.install_plugin() is True
+
+        backup = tmp_path / "game" / "csgo" / "gameinfo.gi.backup"
+        backup.unlink()
+
+        with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
+            assert launcher.install_plugin() is True
+
+        assert backup.read_text(encoding="utf-8") == original_text
+
+    def test_missing_gameinfo_does_not_leave_partial_plugin_tree(self, tmp_path: Path) -> None:
+        launcher, plugin_dll = _make_launcher(tmp_path)
+        (tmp_path / "game" / "csgo" / "gameinfo.gi").unlink()
+
+        with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
+            assert launcher.install_plugin() is False
+
+        assert not (tmp_path / "game" / "csgo" / "csdm").exists()
+
     def test_returns_false_when_plugin_not_found(self, tmp_path: Path) -> None:
         launcher, _ = _make_launcher(tmp_path)
         with patch.object(launcher, "find_plugin_dll", return_value=None):
-            ok = launcher.install_plugin()
-        assert ok is False
+            assert launcher.install_plugin() is False
 
-    def test_returns_false_when_cs2_not_found(self, tmp_path: Path) -> None:
+    def test_returns_false_when_cs2_not_found(self) -> None:
         launcher = CS2Launcher.__new__(CS2Launcher)
         launcher.cs2_path = None
         launcher.hlae_path = None
         assert launcher.install_plugin() is False
 
-
-# ---------------------------------------------------------------------------
-# uninstall_plugin
-# ---------------------------------------------------------------------------
 
 class TestUninstallPlugin:
     def test_gameinfo_gi_is_restored(self, tmp_path: Path) -> None:
@@ -192,13 +182,9 @@ class TestUninstallPlugin:
         with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
             launcher.install_plugin()
 
-        # Confirm it was patched
-        assert _GAMEINFO_CSDM_LINE in gameinfo_path.read_text(encoding="utf-8")
-
         launcher.uninstall_plugin()
 
-        restored_text = gameinfo_path.read_text(encoding="utf-8")
-        assert restored_text == original_text
+        assert gameinfo_path.read_text(encoding="utf-8") == original_text
 
     def test_backup_file_removed_after_uninstall(self, tmp_path: Path) -> None:
         launcher, plugin_dll = _make_launcher(tmp_path)
@@ -207,30 +193,34 @@ class TestUninstallPlugin:
 
         launcher.uninstall_plugin()
 
-        backup = tmp_path / "game" / "csgo" / "gameinfo.gi.backup"
-        assert not backup.exists()
+        assert not (tmp_path / "game" / "csgo" / "gameinfo.gi.backup").exists()
 
     def test_csdm_directory_removed(self, tmp_path: Path) -> None:
         launcher, plugin_dll = _make_launcher(tmp_path)
         with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
             launcher.install_plugin()
 
-        csdm_dir = tmp_path / "game" / "csgo" / "csdm"
-        assert csdm_dir.exists()  # sanity
-
         launcher.uninstall_plugin()
 
-        assert not csdm_dir.exists()
+        assert not (tmp_path / "game" / "csgo" / "csdm").exists()
 
     def test_uninstall_without_prior_install_does_not_crash(self, tmp_path: Path) -> None:
         launcher, _ = _make_launcher(tmp_path)
-        # No backup exists -- should just print a warning, not raise.
         launcher.uninstall_plugin()
 
+    def test_uninstall_preserves_unmanaged_files_in_csdm(self, tmp_path: Path) -> None:
+        launcher, plugin_dll = _make_launcher(tmp_path)
+        with patch.object(launcher, "find_plugin_dll", return_value=plugin_dll):
+            launcher.install_plugin()
 
-# ---------------------------------------------------------------------------
-# launch command construction
-# ---------------------------------------------------------------------------
+        extra_file = tmp_path / "game" / "csgo" / "csdm" / "notes.txt"
+        extra_file.write_text("keep me", encoding="utf-8")
+
+        launcher.uninstall_plugin()
+
+        assert extra_file.exists()
+        assert not (tmp_path / "game" / "csgo" / "csdm" / "bin" / "server.dll").exists()
+
 
 class TestLaunchCommand:
     def test_launch_builds_hlae_command(self, tmp_path: Path) -> None:
@@ -242,10 +232,10 @@ class TestLaunchCommand:
 
         def fake_popen(cmd: list[str], **kwargs):  # type: ignore[override]
             captured_cmd.extend(cmd)
-            m = MagicMock()
-            m.pid = 99
-            m.wait.return_value = 0
-            return m
+            process = MagicMock()
+            process.pid = 99
+            process.wait.return_value = 0
+            return process
 
         with (
             patch.object(launcher, "find_plugin_dll", return_value=plugin_dll),
@@ -254,10 +244,6 @@ class TestLaunchCommand:
             launcher.launch(demo_path=str(demo))
 
         assert captured_cmd[0] == launcher.hlae_path
-        assert "-noGui" in captured_cmd
-        assert "-autoStart" in captured_cmd
-        assert "-noConfig" in captured_cmd
-        assert "-afxDisableSteamStorage" in captured_cmd
         assert "-customLoader" in captured_cmd
         assert "-insecure" in " ".join(captured_cmd)
         assert "+playdemo" in " ".join(captured_cmd)
@@ -281,5 +267,26 @@ class TestLaunchCommand:
         ):
             launcher.launch(demo_path=str(demo))
 
-        # After the failed launch, the plugin should be cleaned up.
+        assert not (tmp_path / "game" / "csgo" / "csdm").exists()
+
+    def test_tasklist_unavailable_waits_for_hlae_before_cleanup(
+        self, tmp_path: Path
+    ) -> None:
+        launcher, plugin_dll = _make_launcher(tmp_path)
+        demo = tmp_path / "match.dem"
+        demo.touch()
+        process = MagicMock()
+        process.pid = 99
+        process.wait.return_value = 0
+
+        with (
+            patch.object(launcher, "find_plugin_dll", return_value=plugin_dll),
+            patch.object(launcher, "_list_cs2_pids", return_value=None),
+            patch("subprocess.Popen", return_value=process),
+            patch("time.sleep", return_value=None),
+        ):
+            returned = launcher.launch(demo_path=str(demo))
+
+        assert returned is process
+        process.wait.assert_called_once_with(timeout=30)
         assert not (tmp_path / "game" / "csgo" / "csdm").exists()

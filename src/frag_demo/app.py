@@ -31,6 +31,7 @@ app.config["JSON_AS_ASCII"] = False
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # Disable static file caching
 
 _CS2_TICKRATE = 64  # CS2 always uses 64 tick (sub-tick system)
+_KILL_ID_COL = "kill_id"
 
 # ---------------------------------------------------------------------------
 # Server-side state (single-user desktop tool)
@@ -77,6 +78,68 @@ def _kills_to_list(df: pd.DataFrame) -> list[dict[str, Any]]:
 def _clean_header(header: dict) -> dict:
     """Make header dict JSON-safe."""
     return {k: _clean_value(v) for k, v in header.items()}
+
+
+def _reset_state() -> None:
+    """Clear the cached demo state after a failed load or explicit reset."""
+    _state["demo_path"] = None
+    _state["header"] = None
+    _state["kills_df"] = None
+    _state["player_slots"] = None
+
+
+def _prepare_kills_df(kills_df: pd.DataFrame) -> pd.DataFrame:
+    """Attach a stable row id so the UI can distinguish same-tick kills."""
+    prepared = kills_df.reset_index(drop=True).copy()
+    prepared[_KILL_ID_COL] = prepared.index.astype(int)
+    return prepared
+
+
+def _parse_bool(value: Any, default: bool | None = False) -> bool | None:
+    """Parse JSON booleans and common string/int equivalents."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    raise ValueError("must be a boolean")
+
+
+def _parse_float_field(
+    data: dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+) -> float:
+    """Parse a float request field with optional lower-bound validation."""
+    raw_value = data.get(key, default)
+    value = float(raw_value)
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{key} must be at least {minimum}")
+    return value
+
+
+def _parse_int_field(
+    data: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+) -> int:
+    """Parse an integer request field with optional lower-bound validation."""
+    raw_value = data.get(key, default)
+    value = int(raw_value)
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{key} must be at least {minimum}")
+    return value
 
 
 def _clean_old_clips(demo_path: str) -> int:
@@ -176,12 +239,15 @@ def api_load():
     if not p.suffix.lower() == ".dem":
         return jsonify({"ok": False, "error": "File must be a .dem file."}), 400
 
+    _reset_state()
+
     try:
         analyzer = DemoAnalyzer(demo_path)
-        kills_df = analyzer.parse_kills()
+        kills_df = _prepare_kills_df(analyzer.parse_kills())
         header = analyzer.parse_header()
         player_slots = analyzer.get_player_slots()
     except Exception as exc:
+        _reset_state()
         return jsonify({"ok": False, "error": f"Failed to parse demo: {exc}"}), 500
 
     # Cache state
@@ -228,7 +294,9 @@ def api_kills():
         except (ValueError, TypeError):
             round_num = None
 
-    if headshot is not None and not isinstance(headshot, bool):
+    try:
+        headshot = _parse_bool(headshot, None)
+    except ValueError:
         headshot = None
 
     engine = QueryEngine(_state["kills_df"])
@@ -255,21 +323,41 @@ def api_record():
         return jsonify({"ok": False, "error": "No demo loaded."}), 400
 
     data = request.get_json(silent=True) or {}
+    selected_ids = data.get("selected_ids")
     selected_ticks = data.get("selected_ticks", [])
-    before = float(data.get("before", 3.0))
-    after = float(data.get("after", 2.0))
-    framerate = int(data.get("framerate", 60))
-    launch = bool(data.get("launch", False))
+    try:
+        before = _parse_float_field(data, "before", 3.0, minimum=0.0)
+        after = _parse_float_field(data, "after", 2.0, minimum=0.0)
+        framerate = _parse_int_field(data, "framerate", 60, minimum=1)
+        launch = bool(_parse_bool(data.get("launch"), False))
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"Invalid record request: {exc}"}), 400
 
-    if not selected_ticks:
+    if selected_ids is None and not selected_ticks:
         return jsonify({"ok": False, "error": "No kills selected."}), 400
 
-    # Filter kills_df to only selected ticks
     kills_df = _state["kills_df"]
-    selected = kills_df[kills_df["tick"].isin(selected_ticks)]
+    if selected_ids is not None:
+        if not isinstance(selected_ids, list):
+            return jsonify({"ok": False, "error": "Invalid selected_ids value."}), 400
+        try:
+            parsed_ids = [int(value) for value in selected_ids]
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Invalid selected_ids value."}), 400
+        if not parsed_ids:
+            return jsonify({"ok": False, "error": "No kills selected."}), 400
+        selected = kills_df[kills_df[_KILL_ID_COL].isin(parsed_ids)]
+    else:
+        if not isinstance(selected_ticks, list):
+            return jsonify({"ok": False, "error": "Invalid selected_ticks value."}), 400
+        try:
+            parsed_ticks = [int(value) for value in selected_ticks]
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Invalid selected_ticks value."}), 400
+        selected = kills_df[kills_df["tick"].isin(parsed_ticks)]
 
     if selected.empty:
-        return jsonify({"ok": False, "error": "None of the selected ticks matched."}), 400
+        return jsonify({"ok": False, "error": "None of the selected kills matched."}), 400
 
     demo_path = _state["demo_path"]
     header = _state["header"] or {}
@@ -304,15 +392,6 @@ def api_record():
     }
 
     if launch:
-        if _cs2_running or _is_cs2_running():
-            return jsonify({
-                "ok": False,
-                "error": "CS2 is already running. Close CS2 first, then try again. "
-                         "(JSON was still updated on disk.)",
-                "json_path": str(json_path),
-                "sequences_count": len(sequences),
-            }), 409
-
         # Detect tools
         launcher = CS2Launcher()
         diagnostics: list[str] = []
@@ -336,18 +415,32 @@ def api_record():
 
         result["diagnostics"] = diagnostics
 
+        with _launch_lock:
+            if _cs2_running or _is_cs2_running():
+                return jsonify({
+                    "ok": False,
+                    "error": "CS2 is already running. Close CS2 first, then try again. "
+                             "(JSON was still updated on disk.)",
+                    "json_path": str(json_path),
+                    "sequences_count": len(sequences),
+                }), 409
+            _cs2_running = True
+
         def _launch_bg():
             global _cs2_running
-            with _launch_lock:
-                _cs2_running = True
             try:
                 launcher.launch(demo_path=demo_path)
             finally:
                 with _launch_lock:
                     _cs2_running = False
 
-        thread = threading.Thread(target=_launch_bg, daemon=True)
-        thread.start()
+        try:
+            thread = threading.Thread(target=_launch_bg, daemon=True)
+            thread.start()
+        except Exception:
+            with _launch_lock:
+                _cs2_running = False
+            raise
         result["launched"] = True
 
     return jsonify(result)
@@ -360,8 +453,11 @@ def api_encode():
         return jsonify({"ok": False, "error": "No demo loaded."}), 400
 
     data = request.get_json(silent=True) or {}
-    framerate = int(data.get("framerate", 60))
-    concatenate = bool(data.get("concatenate", True))
+    try:
+        framerate = _parse_int_field(data, "framerate", 60, minimum=1)
+        concatenate = bool(_parse_bool(data.get("concatenate"), True))
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"Invalid encode request: {exc}"}), 400
 
     demo_path = _state["demo_path"]
     demo_stem = Path(demo_path).stem

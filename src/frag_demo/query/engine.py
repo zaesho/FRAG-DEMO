@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 import pandas as pd
 
 # ---------------------------------------------------------------------------
@@ -101,8 +99,8 @@ class QueryEngine:
             player: Case-insensitive partial match against
                 ``attacker_name``.
             weapon: Case-insensitive partial match against ``weapon``
-                column.  May be a comma-separated list of alternatives
-                (used internally for weapon aliases).
+                column. May be a pipe- or comma-separated list of
+                alternatives (used internally for weapon aliases).
             headshot: When ``True`` return only headshots; ``False``
                 returns only non-headshots.
             round_num: Filter by ``total_rounds_played`` value.
@@ -120,16 +118,20 @@ class QueryEngine:
         if player is not None:
             col = self._find_col(df, "attacker_name")
             if col:
-                mask = df[col].str.contains(player, case=False, na=False)
+                values = df[col].fillna("").astype(str)
+                mask = values.str.contains(player, case=False, na=False, regex=False)
                 df = df[mask]
 
         if weapon is not None:
             col = self._find_col(df, "weapon")
             if col:
-                # weapon may be a pipe-separated list of alternatives
-                parts = [w.strip() for w in weapon.split("|") if w.strip()]
-                pattern = "|".join(re.escape(p) for p in parts)
-                mask = df[col].str.contains(pattern, case=False, na=False, regex=True)
+                values = df[col].fillna("").astype(str).str.lower()
+                mask = pd.Series(False, index=df.index)
+                separators_normalized = weapon.replace(",", "|")
+                for part in (
+                    w.strip().lower() for w in separators_normalized.split("|") if w.strip()
+                ):
+                    mask |= values.str.contains(part, na=False, regex=False)
                 df = df[mask]
 
         if headshot is not None:
@@ -145,8 +147,12 @@ class QueryEngine:
         if side is not None:
             col = self._find_col(df, "attacker_team_name")
             if col:
-                mask = df[col].str.contains(side, case=False, na=False)
-                df = df[mask]
+                values = df[col].fillna("").astype(str).str.upper()
+                normalized_side = self._normalize_side(side)
+                if normalized_side is None:
+                    df = df[values.str.contains(side, case=False, na=False, regex=False)]
+                else:
+                    df = df[values == normalized_side]
 
         return df.reset_index(drop=True)
 
@@ -177,7 +183,7 @@ class QueryEngine:
         if not query_str.strip():
             return self.kills_df.copy()
 
-        tokens = query_str.lower().split()
+        tokens = self._tokenize(query_str)
 
         player_tokens: list[str] = []
         weapon_alternatives: list[str] = []
@@ -190,13 +196,18 @@ class QueryEngine:
             token = tokens[i]
 
             # "round N" pattern
-            if token == "round" and i + 1 < len(tokens):
-                try:
-                    round_num = int(tokens[i + 1])
+            if token == "round":
+                if i + 1 < len(tokens):
+                    try:
+                        round_num = int(tokens[i + 1])
+                    except ValueError:
+                        i += 2
+                        continue
                     i += 2
                     continue
-                except ValueError:
-                    pass
+
+                i += 1
+                continue
 
             # headshot keywords
             if token in ("headshot", "hs"):
@@ -238,15 +249,22 @@ class QueryEngine:
             i += 1
 
         player = " ".join(player_tokens) if player_tokens else None
-        weapon = "|".join(weapon_alternatives) if weapon_alternatives else None
 
-        return self.query(
+        result = self.query(
             player=player,
-            weapon=weapon,
             headshot=headshot,
             round_num=round_num,
             side=side,
         )
+
+        if weapon_alternatives:
+            col = self._find_col(result, "weapon")
+            if col:
+                exact_weapons = {weapon.lower() for weapon in weapon_alternatives}
+                values = result[col].fillna("").astype(str).str.lower()
+                result = result[values.isin(exact_weapons)]
+
+        return result.reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -258,3 +276,25 @@ class QueryEngine:
         if name in df.columns:
             return name
         return None
+
+    @staticmethod
+    def _normalize_side(side: str) -> str | None:
+        """Normalize common side labels to demoparser's team names."""
+        normalized = side.strip().lower()
+        if normalized in {"ct", "counterterrorist", "counter-terrorist"}:
+            return "CT"
+        if normalized in {"t", "terrorist"}:
+            return "TERRORIST"
+        return None
+
+    @staticmethod
+    def _tokenize(query_str: str) -> list[str]:
+        """Split a natural-language query while stripping common punctuation."""
+        return [
+            token
+            for token in (
+                raw.strip(".,;:!?()[]{}\"'")
+                for raw in query_str.lower().split()
+            )
+            if token
+        ]

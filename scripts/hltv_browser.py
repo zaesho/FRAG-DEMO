@@ -1,6 +1,6 @@
 """Open HLTV in a stealth browser for manual demo downloading.
 
-The browser stays open so you can navigate to matches and click 
+The browser stays open so you can navigate to matches and click
 'GOTV Demo' download links. Downloaded files go to demos/.
 """
 import sys
@@ -49,8 +49,7 @@ def main():
         print(f"Opening {TARGET_URL}")
         print(f"Downloads will be saved to: {DEMOS_DIR}")
         print("Navigate to match pages and click 'GOTV Demo' to download.")
-        print("Close the browser window when done.
-")
+        print("Close the browser window when done.\n")
 
         page.goto(TARGET_URL, timeout=60000)
 
@@ -63,8 +62,7 @@ def main():
         except KeyboardInterrupt:
             pass
 
-    print("
-Browser closed. Check demos/ for downloaded files.")
+    print("\nBrowser closed. Check demos/ for downloaded files.")
     for f in DEMOS_DIR.iterdir():
         if f.suffix in (".dem", ".rar", ".gz", ".zip"):
             print(f"  {f.name} ({f.stat().st_size / 1024 / 1024:.1f} MB)")

@@ -2,7 +2,7 @@
 
 // -- State --
 let currentKills = [];          // Last fetched kill list (from filters)
-let queue = new Map();          // tick -> kill object (the recording queue)
+let queue = new Map();          // kill_id -> kill object (the recording queue)
 let cs2Running = false;
 
 // -- DOM refs --
@@ -32,6 +32,15 @@ function logOutput(msg, cls = "") {
     line.textContent = "> " + msg;
     log.appendChild(line);
     log.scrollTop = log.scrollHeight;
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
 }
 
 // -- Spinner --
@@ -66,8 +75,25 @@ function updateCS2State(running) {
 async function pollStatus() {
     try {
         const data = await apiGet("/api/status");
+        if (!data.loaded) {
+            clearLoadedState();
+        }
         updateCS2State(data.cs2_running || false);
     } catch (e) { /* ignore */ }
+}
+
+function clearLoadedState() {
+    currentKills = [];
+    queue.clear();
+    updateStatus(false);
+    $("#demo-info").style.display = "none";
+    $("#preview-section").style.display = "none";
+    $$("#filters-section, #kills-section, #queue-section, #record-section").forEach(
+        (el) => (el.style.display = "none")
+    );
+    renderTable([]);
+    renderQueue();
+    updateRecordButton();
 }
 
 // -- Demo loading --
@@ -96,6 +122,7 @@ async function loadDemo() {
         const data = await apiPost("/api/load", { demo_path: demoPath });
 
         if (!data.ok) {
+            clearLoadedState();
             logOutput("Error: " + data.error, "log-error");
             setLoading(false);
             return;
@@ -127,6 +154,7 @@ async function loadDemo() {
         await fetchKills();
         await loadClips();
     } catch (e) {
+        clearLoadedState();
         logOutput("Error: " + e.message, "log-error");
     }
 
@@ -210,18 +238,19 @@ function renderTable(kills) {
     tbody.innerHTML = kills
         .map((k) => {
             const tick = k.tick || 0;
-            const inQueue = queue.has(tick);
+            const killId = Number.isInteger(k.kill_id) ? k.kill_id : tick;
+            const inQueue = queue.has(killId);
             const rowClass = inQueue ? "selected" : "";
             const hs = k.headshot ? "HS" : "";
             const hsClass = k.headshot ? "hs-yes" : "";
             const round = k.total_rounds_played != null ? k.total_rounds_played : "?";
-            return `<tr class="${rowClass}" data-tick="${tick}">
-                <td class="col-check"><input type="checkbox" ${inQueue ? "checked" : ""} onchange="toggleKill(${tick})"></td>
+            return `<tr class="${rowClass}" data-kill-id="${killId}">
+                <td class="col-check"><input type="checkbox" ${inQueue ? "checked" : ""} onchange="toggleKill(${killId})"></td>
                 <td class="col-tick">${tick}</td>
-                <td>${round}</td>
-                <td>${k.attacker_name || "?"}</td>
-                <td>${k.user_name || "?"}</td>
-                <td>${k.weapon || "?"}</td>
+                <td>${escapeHtml(round)}</td>
+                <td>${escapeHtml(k.attacker_name || "?")}</td>
+                <td>${escapeHtml(k.user_name || "?")}</td>
+                <td>${escapeHtml(k.weapon || "?")}</td>
                 <td class="${hsClass}">${hs}</td>
             </tr>`;
         })
@@ -229,18 +258,17 @@ function renderTable(kills) {
 }
 
 // Checking a kill in the table directly adds/removes it from the queue
-function toggleKill(tick) {
-    if (queue.has(tick)) {
-        queue.delete(tick);
+function toggleKill(killId) {
+    if (queue.has(killId)) {
+        queue.delete(killId);
     } else {
-        // Find the kill object for this tick
-        const kill = currentKills.find((k) => k.tick === tick);
-        if (kill) queue.set(tick, kill);
+        const kill = currentKills.find((k) => k.kill_id === killId);
+        if (kill) queue.set(killId, kill);
     }
     // Update just the row highlight (no full re-render)
-    const row = $(`tr[data-tick="${tick}"]`);
+    const row = $(`tr[data-kill-id="${killId}"]`);
     if (row) {
-        row.classList.toggle("selected", queue.has(tick));
+        row.classList.toggle("selected", queue.has(killId));
     }
     renderQueue();
     updateRecordButton();
@@ -248,7 +276,7 @@ function toggleKill(tick) {
 
 function selectAll() {
     for (const k of currentKills) {
-        if (k.tick != null) queue.set(k.tick, k);
+        if (Number.isInteger(k.kill_id)) queue.set(k.kill_id, k);
     }
     renderTable(currentKills);
     renderQueue();
@@ -258,7 +286,7 @@ function selectAll() {
 function selectNone() {
     // Only deselect kills currently visible in the table
     for (const k of currentKills) {
-        if (k.tick != null) queue.delete(k.tick);
+        if (Number.isInteger(k.kill_id)) queue.delete(k.kill_id);
     }
     renderTable(currentKills);
     renderQueue();
@@ -266,8 +294,8 @@ function selectNone() {
 }
 
 // -- Queue display --
-function removeFromQueue(tick) {
-    queue.delete(tick);
+function removeFromQueue(killId) {
+    queue.delete(killId);
     renderQueue();
     renderTable(currentKills);
     updateRecordButton();
@@ -300,16 +328,17 @@ function renderQueue() {
     tbody.innerHTML = items
         .map((k) => {
             const tick = k.tick || 0;
+            const killId = Number.isInteger(k.kill_id) ? k.kill_id : tick;
             const hs = k.headshot ? "HS" : "";
             const hsClass = k.headshot ? "hs-yes" : "";
             const round = k.total_rounds_played != null ? k.total_rounds_played : "?";
             return `<tr>
-                <td><button class="btn-remove" onclick="removeFromQueue(${tick})">x</button></td>
+                <td><button class="btn-remove" onclick="removeFromQueue(${killId})">x</button></td>
                 <td class="col-tick">${tick}</td>
-                <td>${round}</td>
-                <td>${k.attacker_name || "?"}</td>
-                <td>${k.user_name || "?"}</td>
-                <td>${k.weapon || "?"}</td>
+                <td>${escapeHtml(round)}</td>
+                <td>${escapeHtml(k.attacker_name || "?")}</td>
+                <td>${escapeHtml(k.user_name || "?")}</td>
+                <td>${escapeHtml(k.weapon || "?")}</td>
                 <td class="${hsClass}">${hs}</td>
             </tr>`;
         })
@@ -343,18 +372,21 @@ async function startRecord(launch) {
         return;
     }
 
-    const before = parseFloat($("#rec-before").value) || 3.0;
-    const after = parseFloat($("#rec-after").value) || 2.0;
-    const framerate = parseInt($("#rec-framerate").value) || 60;
-    const ticks = Array.from(queue.keys());
+    const beforeValue = parseFloat($("#rec-before").value);
+    const afterValue = parseFloat($("#rec-after").value);
+    const framerateValue = parseInt($("#rec-framerate").value, 10);
+    const before = Number.isNaN(beforeValue) ? 3.0 : beforeValue;
+    const after = Number.isNaN(afterValue) ? 2.0 : afterValue;
+    const framerate = Number.isNaN(framerateValue) ? 60 : framerateValue;
+    const selectedIds = Array.from(queue.keys());
 
     $("#btn-record").disabled = true;
     $("#btn-generate").disabled = true;
-    logOutput(`${launch ? "Recording" : "Generating JSON for"} ${ticks.length} kill(s)...`);
+    logOutput(`${launch ? "Recording" : "Generating JSON for"} ${selectedIds.length} kill(s)...`);
 
     try {
         const data = await apiPost("/api/record", {
-            selected_ticks: ticks,
+            selected_ids: selectedIds,
             before, after, framerate,
             launch,
         });
@@ -410,9 +442,15 @@ async function loadClips() {
             .map((c) => {
                 const label = c.is_combined ? "ALL CLIPS" : c.name.replace(".mp4", "");
                 const cls = c.is_combined ? "clip-btn combined" : "clip-btn";
-                return `<button class="${cls}" onclick="playClip('${c.name}')" title="${c.size_mb} MB">${label}</button>`;
+                return `<button class="${cls}" data-filename="${encodeURIComponent(c.name)}" title="${escapeHtml(c.size_mb)} MB">${escapeHtml(label)}</button>`;
             })
             .join("");
+
+        $$(".clip-btn").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                playClip(decodeURIComponent(btn.dataset.filename || ""));
+            });
+        });
 
         // Auto-play the combined clip if available, otherwise the first one
         const combined = data.clips.find((c) => c.is_combined);
@@ -431,7 +469,7 @@ function playClip(filename) {
     // Highlight active button
     $$(".clip-btn").forEach((btn) => btn.classList.remove("active"));
     const activeBtn = Array.from($$(".clip-btn")).find(
-        (btn) => btn.getAttribute("onclick").includes(filename)
+        (btn) => decodeURIComponent(btn.dataset.filename || "") === filename
     );
     if (activeBtn) activeBtn.classList.add("active");
 }
@@ -451,7 +489,8 @@ async function cleanClips() {
 
 // -- Encoding --
 async function encodeClips() {
-    const framerate = parseInt($("#rec-framerate").value) || 60;
+    const framerateValue = parseInt($("#rec-framerate").value, 10);
+    const framerate = Number.isNaN(framerateValue) ? 60 : framerateValue;
 
     $("#btn-encode").disabled = true;
     logOutput("Encoding TGA clips to MP4...");

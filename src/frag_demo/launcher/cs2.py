@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import csv
 from pathlib import Path
 
 
@@ -94,7 +95,7 @@ class CS2Launcher:
                     if line.startswith('"path"'):
                         parts = line.split('"')
                         if len(parts) >= 4:
-                            lib_path = parts[3].replace("", "")
+                            lib_path = parts[3].replace("\\\\", "\\")
                             candidate = (
                                 Path(lib_path)
                                 / "steamapps"
@@ -159,7 +160,18 @@ class CS2Launcher:
         if not self.cs2_path:
             return None
         # cs2.exe lives at <root>/game/bin/win64/cs2.exe
-        return Path(self.cs2_path).resolve().parents[3]
+        cs2_exe = Path(self.cs2_path).resolve()
+        if len(cs2_exe.parents) < 4:
+            return None
+        if cs2_exe.name.lower() != "cs2.exe":
+            return None
+        if cs2_exe.parent.name.lower() != "win64":
+            return None
+        if cs2_exe.parents[1].name.lower() != "bin":
+            return None
+        if cs2_exe.parents[2].name.lower() != "game":
+            return None
+        return cs2_exe.parents[3]
 
     # ------------------------------------------------------------------
     # Plugin lifecycle
@@ -192,6 +204,34 @@ class CS2Launcher:
             )
             return False
 
+        gameinfo_path = cs2_root / "game" / "csgo" / "gameinfo.gi"
+        if not gameinfo_path.exists():
+            print(f"[frag-demo] ERROR: gameinfo.gi not found at {gameinfo_path}")
+            return False
+
+        backup_path = gameinfo_path.with_suffix(".gi.backup")
+        original_text = gameinfo_path.read_text(encoding="utf-8", errors="replace")
+        already_patched = _GAMEINFO_CSDM_LINE in original_text
+        patched_text = original_text
+        reverted_text = original_text.replace(
+            _GAMEINFO_CSDM_LINE + "\n\t\t\t" + _GAMEINFO_CSGO_LINE,
+            _GAMEINFO_CSGO_LINE,
+            1,
+        )
+
+        if not already_patched:
+            patched_text = original_text.replace(
+                _GAMEINFO_CSGO_LINE,
+                _GAMEINFO_CSDM_LINE + "\n\t\t\t" + _GAMEINFO_CSGO_LINE,
+                1,
+            )
+            if patched_text == original_text:
+                print(
+                    "[frag-demo] WARNING: Could not find the expected 'Game\\tcsgo' line "
+                    "in gameinfo.gi. The file may have an unexpected format."
+                )
+                return False
+
         # --- Copy DLL ---
         dest_dir = cs2_root / "game" / "csgo" / "csdm" / "bin"
         dest_dll = dest_dir / "server.dll"
@@ -202,52 +242,48 @@ class CS2Launcher:
         dest_win64_dll = dest_win64_dir / "server.dll"
         dest_win64_dir.mkdir(parents=True, exist_ok=True)
 
-        for dst in (dest_dll, dest_win64_dll):
-            try:
-                print(f"[frag-demo] Copying plugin: {plugin_src} -> {dst}")
-                shutil.copy2(str(plugin_src), str(dst))
-            except PermissionError:
-                if dst.exists():
-                    print(f"[frag-demo] DLL locked but already in place: {dst} (skipping)")
-                else:
-                    print(f"[frag-demo] ERROR: Cannot copy DLL to {dst} (locked)")
-                    return False
+        try:
+            for dst in (dest_dll, dest_win64_dll):
+                try:
+                    print(f"[frag-demo] Copying plugin: {plugin_src} -> {dst}")
+                    shutil.copy2(str(plugin_src), str(dst))
+                except PermissionError:
+                    if dst.exists():
+                        print(
+                            f"[frag-demo] DLL locked but already in place: {dst} (skipping)"
+                        )
+                    else:
+                        raise RuntimeError(f"Cannot copy DLL to {dst} (locked)")
 
-        # --- Patch gameinfo.gi ---
-        gameinfo_path = cs2_root / "game" / "csgo" / "gameinfo.gi"
-        if not gameinfo_path.exists():
-            print(f"[frag-demo] ERROR: gameinfo.gi not found at {gameinfo_path}")
-            return False
+            if already_patched:
+                if not backup_path.exists():
+                    if reverted_text != original_text:
+                        backup_path.write_text(reverted_text, encoding="utf-8")
+                        print(
+                            "[frag-demo] Reconstructed missing gameinfo.gi.backup "
+                            "from the already-patched file."
+                        )
+                    else:
+                        print(
+                            "[frag-demo] WARNING: gameinfo.gi is already patched but "
+                            "its original contents could not be reconstructed."
+                        )
+                print(
+                    "[frag-demo] gameinfo.gi already contains csdm entry — skipping patch."
+                )
+                return True
 
-        backup_path = gameinfo_path.with_suffix(".gi.backup")
-        print(f"[frag-demo] Backing up gameinfo.gi -> {backup_path.name}")
-        shutil.copy2(str(gameinfo_path), str(backup_path))
+            if not backup_path.exists():
+                print(f"[frag-demo] Backing up gameinfo.gi -> {backup_path.name}")
+                shutil.copy2(str(gameinfo_path), str(backup_path))
 
-        original_text = gameinfo_path.read_text(encoding="utf-8", errors="replace")
-
-        # Check if the plugin entry is already present to avoid duplicates.
-        if _GAMEINFO_CSDM_LINE in original_text:
-            print("[frag-demo] gameinfo.gi already contains csdm entry — skipping patch.")
+            gameinfo_path.write_text(patched_text, encoding="utf-8")
+            print("[frag-demo] gameinfo.gi patched successfully.")
             return True
-
-        # Insert "Game\tcsgo/csdm" on a new line immediately before the
-        # first occurrence of "Game\tcsgo".
-        patched_text = original_text.replace(
-            _GAMEINFO_CSGO_LINE,
-            _GAMEINFO_CSDM_LINE + "\n\t\t\t" + _GAMEINFO_CSGO_LINE,
-            1,
-        )
-
-        if patched_text == original_text:
-            print(
-                "[frag-demo] WARNING: Could not find the expected 'Game\\tcsgo' line "
-                "in gameinfo.gi. The file may have an unexpected format."
-            )
+        except Exception as exc:
+            print(f"[frag-demo] ERROR: Plugin installation failed: {exc}")
+            self._remove_plugin_files(cs2_root)
             return False
-
-        gameinfo_path.write_text(patched_text, encoding="utf-8")
-        print("[frag-demo] gameinfo.gi patched successfully.")
-        return True
 
     def uninstall_plugin(self) -> None:
         """Remove the CS Demo Manager server plugin from CS2.
@@ -271,11 +307,8 @@ class CS2Launcher:
         else:
             print("[frag-demo] WARNING: No gameinfo.gi.backup found — skipping restore.")
 
-        # --- Remove csdm folder ---
-        csdm_dir = cs2_root / "game" / "csgo" / "csdm"
-        if csdm_dir.exists():
-            print(f"[frag-demo] Removing csdm directory: {csdm_dir}")
-            shutil.rmtree(str(csdm_dir), ignore_errors=True)
+        # --- Remove frag-demo managed plugin files ---
+        self._remove_plugin_files(cs2_root)
 
     # ------------------------------------------------------------------
     # Launch
@@ -359,6 +392,7 @@ class CS2Launcher:
         proc: subprocess.Popen | None = None  # type: ignore[type-arg]
         try:
             print("\n[frag-demo] Starting CS2 via HLAE...")
+            existing_cs2_pids = self._list_cs2_pids()
             proc = subprocess.Popen(cmd)
             print(f"[frag-demo] HLAE started (PID {proc.pid}).")
 
@@ -367,17 +401,30 @@ class CS2Launcher:
             print("[frag-demo] Waiting for CS2 to start...")
             import time
 
+            if existing_cs2_pids is None:
+                print(
+                    "[frag-demo] WARNING: 'tasklist' is unavailable; "
+                    "waiting on HLAE only before cleanup."
+                )
+                try:
+                    proc.wait(timeout=30)
+                except Exception:
+                    pass
+                time.sleep(5)
+                return proc
+
             cs2_started = False
+            launched_cs2_pid: int | None = None
             for _ in range(120):  # up to 2 minutes for CS2 to appear
                 time.sleep(1)
                 try:
-                    result = subprocess.run(
-                        ["tasklist", "/fi", "imagename eq cs2.exe", "/nh"],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if "cs2.exe" in result.stdout.lower():
+                    current_pids = self._list_cs2_pids()
+                    if current_pids is None:
+                        break
+                    new_pids = current_pids - existing_cs2_pids
+                    if new_pids:
                         cs2_started = True
+                        launched_cs2_pid = max(new_pids)
                         print("[frag-demo] CS2 is running. Waiting for demo playback to finish...")
                         break
                 except Exception:
@@ -390,12 +437,10 @@ class CS2Launcher:
                 while True:
                     time.sleep(2)
                     try:
-                        result = subprocess.run(
-                            ["tasklist", "/fi", "imagename eq cs2.exe", "/nh"],
-                            capture_output=True,
-                            text=True,
-                        )
-                        if "cs2.exe" not in result.stdout.lower():
+                        current_pids = self._list_cs2_pids()
+                        if current_pids is None:
+                            break
+                        if launched_cs2_pid is None or launched_cs2_pid not in current_pids:
                             break
                     except Exception:
                         break
@@ -426,3 +471,50 @@ class CS2Launcher:
                 r"Expected at: C:\Program Files (x86)\Steam\steamapps\common"
                 r"\Counter-Strike Global Offensive\game\bin\win64\cs2.exe"
             )
+
+    @staticmethod
+    def _remove_plugin_files(cs2_root: Path) -> None:
+        """Remove only the plugin files and empty directories created by frag-demo."""
+        csdm_dir = cs2_root / "game" / "csgo" / "csdm"
+        managed_paths = [
+            csdm_dir / "bin" / "win64" / "server.dll",
+            csdm_dir / "bin" / "server.dll",
+        ]
+
+        for path in managed_paths:
+            if path.exists():
+                print(f"[frag-demo] Removing plugin file: {path}")
+                path.unlink(missing_ok=True)
+
+        for directory in (csdm_dir / "bin" / "win64", csdm_dir / "bin", csdm_dir):
+            if directory.exists():
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _list_cs2_pids() -> set[int] | None:
+        """Return the currently running cs2.exe PIDs on Windows."""
+        tasklist_path = shutil.which("tasklist")
+        if tasklist_path is None:
+            return None
+
+        try:
+            result = subprocess.run(
+                [tasklist_path, "/fi", "imagename eq cs2.exe", "/fo", "csv", "/nh"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return set()
+
+        pids: set[int] = set()
+        for row in csv.reader(result.stdout.splitlines()):
+            if len(row) >= 2 and row[0].lower() == "cs2.exe":
+                try:
+                    pids.add(int(row[1]))
+                except ValueError:
+                    continue
+        return pids

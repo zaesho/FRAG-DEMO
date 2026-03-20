@@ -26,6 +26,8 @@ class DemoAnalyzer:
             player=["X", "Y", "Z", "last_place_name", "team_name", "player_steamid"],
             other=["total_rounds_played", "is_warmup_period"],
         )
+        if "is_warmup_period" in df.columns:
+            df = df[df["is_warmup_period"] == False].reset_index(drop=True)  # noqa: E712
         return df
 
     def parse_header(self) -> dict:
@@ -55,12 +57,15 @@ class DemoAnalyzer:
         return self.parser.parse_ticks(fields, ticks=ticks)
 
     def get_player_slots(self, probe_tick: int = 128) -> dict[str, int]:
-        """Return a mapping of player name -> entity slot number.
+        """Return a mapping of player identity -> entity slot number.
 
         The entity slot (also called the player index) is required for the
         ``spec_player {slot}`` console command used by the CS Demo Manager
-        plugin.  demoparser2 exposes it through the ``entity_id`` column
+        plugin. demoparser2 exposes it through the ``entity_id`` column
         when parsing per-tick data.
+
+        The returned mapping prefers stable SteamIDs when available, but also
+        includes player-name aliases as a fallback for older callers.
 
         Args:
             probe_tick: The demo tick to sample.  Defaults to 128 so that
@@ -68,27 +73,37 @@ class DemoAnalyzer:
                 no data.
 
         Returns:
-            Dict mapping player_name -> entity_id (int).  Returns an empty
+            Dict mapping SteamID/name -> entity_id (int). Returns an empty
             dict if the information cannot be retrieved.
         """
+        last_error: Exception | None = None
         for tick in (probe_tick, 64, 1):
             try:
                 df = self.parser.parse_ticks(
-                    ["player_name", "entity_id"],
+                    ["player_name", "player_steamid", "entity_id"],
                     ticks=[tick],
                 )
                 if df is not None and not df.empty and "entity_id" in df.columns:
                     result: dict[str, int] = {}
                     for _, row in df.iterrows():
                         name = str(row.get("player_name", ""))
+                        steamid = row.get("player_steamid")
                         eid = row.get("entity_id")
-                        if name and eid is not None and not pd.isna(eid):
-                            if name not in result:
-                                result[name] = int(eid)
+                        if eid is None or pd.isna(eid):
+                            continue
+                        slot = int(eid)
+                        if steamid is not None and not pd.isna(steamid):
+                            result.setdefault(str(steamid), slot)
+                        if name:
+                            result.setdefault(name, slot)
                     if result:
                         return result
-            except Exception:
+            except Exception as exc:
+                last_error = exc
                 continue
+
+        if last_error is not None:
+            print(f"[frag-demo] WARNING: Failed to discover player slots: {last_error}")
         return {}
 
     def get_players(self) -> pd.DataFrame:
@@ -103,16 +118,17 @@ class DemoAnalyzer:
             DataFrame with at least columns: player_name, player_steamid,
             team_name.
         """
-        try:
-            df = self.parser.parse_ticks(
-                ["player_name", "player_steamid", "team_name"], ticks=[1]
-            )
-            if df is not None and not df.empty:
-                return df.drop_duplicates(subset=["player_steamid"]).reset_index(
-                    drop=True
+        for tick in (128, 64, 1):
+            try:
+                df = self.parser.parse_ticks(
+                    ["player_name", "player_steamid", "team_name"], ticks=[tick]
                 )
-        except Exception:
-            pass
+                if df is not None and not df.empty:
+                    return df.drop_duplicates(subset=["player_steamid"]).reset_index(
+                        drop=True
+                    )
+            except Exception:
+                continue
 
         # Fallback: derive players from kill events
         kills = self.parse_kills()
@@ -131,6 +147,20 @@ class DemoAnalyzer:
                 }
             )
             .dropna(subset=["player_steamid"])
-            .drop_duplicates(subset=["player_steamid"])
         )
-        return attackers.reset_index(drop=True)
+        victims = (
+            kills[["user_name", "user_steamid", "user_team_name"]]
+            .rename(
+                columns={
+                    "user_name": "player_name",
+                    "user_steamid": "player_steamid",
+                    "user_team_name": "team_name",
+                }
+            )
+            .dropna(subset=["player_steamid"])
+            if {"user_name", "user_steamid", "user_team_name"}.issubset(kills.columns)
+            else pd.DataFrame(columns=["player_name", "player_steamid", "team_name"])
+        )
+
+        players = pd.concat([attackers, victims], ignore_index=True)
+        return players.drop_duplicates(subset=["player_steamid"]).reset_index(drop=True)

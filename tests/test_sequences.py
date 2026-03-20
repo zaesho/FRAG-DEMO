@@ -29,11 +29,16 @@ def builder() -> SequenceBuilder:
     )
 
 
-def _make_kill(tick: int, attacker: str = "zywoo", weapon: str = "awp") -> dict:
+def _make_kill(
+    tick: int,
+    attacker: str = "zywoo",
+    weapon: str = "awp",
+    steamid: str = "76561198025798240",
+) -> dict:
     return {
         "tick": tick,
         "attacker_name": attacker,
-        "attacker_steamid": "76561198025798240",
+        "attacker_steamid": steamid,
         "attacker_team_name": "CT",
         "user_name": "victim",
         "weapon": weapon,
@@ -118,6 +123,18 @@ class TestGroupedKills:
         seqs = builder.build_sequences(df, "match.dem")
         assert len(seqs) == 2
 
+    def test_kills_from_different_attackers_are_not_grouped(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame(
+            [
+                _make_kill(tick=10000, attacker="zywoo", steamid="1"),
+                _make_kill(tick=10200, attacker="s1mple", steamid="2"),
+            ]
+        )
+        seqs = builder.build_sequences(df, "match.dem")
+        assert len(seqs) == 2
+
 
 class TestSequenceStructure:
     def test_required_cmds_present(self, builder: SequenceBuilder) -> None:
@@ -135,6 +152,30 @@ class TestSequenceStructure:
         seqs = builder.build_sequences(df, "match.dem")
         ticks = [a["tick"] for a in seqs[0]["actions"]]
         assert ticks == sorted(ticks)
+
+    def test_all_action_ticks_are_at_least_min_valid_tick(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        ticks = [a["tick"] for a in seqs[0]["actions"]]
+        assert min(ticks) == builder._MIN_VALID_TICK
+
+    def test_initial_demo_gototick_uses_min_valid_tick(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        action = next(a for a in seqs[0]["actions"] if a["cmd"].startswith("demo_gototick "))
+        assert action["tick"] == builder._MIN_VALID_TICK
+
+    def test_demo_gototick_target_is_clamped_for_early_kill(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame([_make_kill(tick=100)])
+        seqs = builder.build_sequences(df, "match.dem")
+        action = next(a for a in seqs[0]["actions"] if a["cmd"].startswith("demo_gototick "))
+        assert action["cmd"] == f"demo_gototick {builder._MIN_VALID_TICK}"
 
     def test_record_end_after_record_start(self, builder: SequenceBuilder) -> None:
         df = pd.DataFrame([_make_kill(tick=10000)])
@@ -183,6 +224,46 @@ class TestSequenceStructure:
             a["tick"] for a in actions if a["cmd"] == "endmovie"
         )
         assert end_tick > kill_tick
+
+    def test_startmovie_path_uses_sanitized_attacker_name(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000, attacker='../b:ad"name')])
+        seqs = builder.build_sequences(df, "match.dem")
+        startmovie_cmd = next(
+            a["cmd"] for a in seqs[0]["actions"] if a["cmd"].startswith('startmovie "')
+        )
+        assert "b_ad_name" in startmovie_cmd
+        assert '../b:ad"name' not in startmovie_cmd
+
+    def test_startmovie_path_uses_sanitized_demo_name(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, 'bad demo"name?.dem')
+        startmovie_cmd = next(
+            a["cmd"] for a in seqs[0]["actions"] if a["cmd"].startswith('startmovie "')
+        )
+        assert "bad_demo_name_0000_zywoo" in startmovie_cmd
+        assert 'bad demo"name?' not in startmovie_cmd
+
+    def test_spec_player_prefers_steamid_mapping_over_name(
+        self, tmp_path: Path
+    ) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            player_slots={"zywoo": 1, "2": 9},
+        )
+        df = pd.DataFrame([_make_kill(tick=10000, attacker="zywoo", steamid="2")])
+        seqs = builder.build_sequences(df, "match.dem")
+
+        spec_cmd = next(
+            a["cmd"]
+            for a in seqs[0]["actions"]
+            if a["cmd"].startswith("spec_player")
+        )
+        assert spec_cmd == "spec_player 9"
 
 
 class TestWriteJson:
@@ -250,3 +331,17 @@ class TestTicksFromSeconds:
     def test_128_tickrate(self) -> None:
         b = SequenceBuilder(tickrate=128.0)
         assert b._ticks_from_seconds(1.0) == 128
+
+
+class TestBuilderValidation:
+    def test_negative_start_padding_rejected(self) -> None:
+        with pytest.raises(ValueError, match="start_seconds_before"):
+            SequenceBuilder(start_seconds_before=-1.0)
+
+    def test_negative_end_padding_rejected(self) -> None:
+        with pytest.raises(ValueError, match="end_seconds_after"):
+            SequenceBuilder(end_seconds_after=-1.0)
+
+    def test_non_positive_framerate_rejected(self) -> None:
+        with pytest.raises(ValueError, match="framerate"):
+            SequenceBuilder(framerate=0)

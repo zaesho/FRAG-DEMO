@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ class SequenceBuilder:
     The structure mirrors cs-demo-manager's ``create-cs2-video-json-file.ts``:
 
     1. At **tick 64** (the minimum valid tick) — global one-time setup commands.
-    2. At **tick 1** — a ``demo_gototick`` jump to just before the setup tick.
+    2. At **tick 64** — a ``demo_gototick`` jump to just before the setup tick.
     3. At **setup_tick** — per-clip setup (stream name, fps, clear death msgs,
        spectate target).
     4. At **start_tick - 4** — ``pause_playback`` so the loading screen clears.
@@ -44,7 +45,7 @@ class SequenceBuilder:
               {"tick": 64,   "cmd": "sv_cheats 1"},
               {"tick": 64,   "cmd": "volume 1"},
               ...
-              {"tick": 1,    "cmd": "demo_gototick 9700"},
+              {"tick": 64,   "cmd": "demo_gototick 9700"},
               {"tick": 9764, "cmd": "mirv_streams record name \\"C:/clips/clip_0000\\""},
               {"tick": 9764, "cmd": "mirv_streams record fps 60"},
               ...
@@ -61,7 +62,7 @@ class SequenceBuilder:
     # the go_to_next_sequence command.
     _NEXT_SEQ_PADDING: int = 64
 
-    # The CS Demo Manager plugin floors all ticks to this minimum.
+    # CS2 JSON actions should not be emitted before this tick.
     _MIN_VALID_TICK: int = 64
 
     # How many ticks before start_tick to issue pause_playback so that the
@@ -79,12 +80,20 @@ class SequenceBuilder:
         player_slots: dict[str, int] | None = None,
     ) -> None:
         self.tickrate = float(tickrate)
+        if self.tickrate <= 0:
+            raise ValueError("tickrate must be positive")
+        if start_seconds_before < 0:
+            raise ValueError("start_seconds_before must be non-negative")
+        if end_seconds_after < 0:
+            raise ValueError("end_seconds_after must be non-negative")
+        if framerate <= 0:
+            raise ValueError("framerate must be positive")
         self.recording_system = recording_system
         self.start_seconds_before = start_seconds_before
         self.end_seconds_after = end_seconds_after
         self.framerate = framerate
         self.output_path = output_path
-        # Maps player name -> entity slot number for spec_player commands.
+        # Maps stable player identity -> entity slot number for spec_player commands.
         self.player_slots: dict[str, int] = player_slots or {}
 
     # ------------------------------------------------------------------
@@ -111,7 +120,7 @@ class SequenceBuilder:
         if kills_df.empty:
             return []
 
-        demo_name = Path(demo_path).stem
+        demo_name = self._safe_label_component(Path(demo_path).stem)
 
         # Resolve the output directory to an absolute path so that the
         # MIRV command string always contains a full, forward-slash path.
@@ -121,6 +130,7 @@ class SequenceBuilder:
         tick_col = self._find_col(kills_df, "tick")
         attacker_col = self._find_col(kills_df, "attacker_name")
         attacker_steamid_col = self._find_col(kills_df, "attacker_steamid")
+        attacker_key_col = attacker_steamid_col or attacker_col
 
         if tick_col is None:
             raise ValueError(
@@ -135,15 +145,19 @@ class SequenceBuilder:
         groups: list[list[Any]] = []
         current_group: list[Any] = []
         prev_tick: int | None = None
+        prev_attacker: str | None = None
 
         for _, row in kills_sorted.iterrows():
             tick = int(row[tick_col])
-            if prev_tick is None or (tick - prev_tick) <= group_threshold:
+            attacker_key = self._attacker_key(row, attacker_key_col, attacker_col)
+            same_pov = prev_attacker is None or attacker_key == prev_attacker
+            if prev_tick is None or ((tick - prev_tick) <= group_threshold and same_pov):
                 current_group.append(row)
             else:
                 groups.append(current_group)
                 current_group = [row]
             prev_tick = tick
+            prev_attacker = attacker_key
 
         if current_group:
             groups.append(current_group)
@@ -172,8 +186,9 @@ class SequenceBuilder:
             # Use attacker from the first kill in the group as the POV
             first_row = group[0]
             attacker_name = str(first_row[attacker_col]) if attacker_col else "unknown"
+            safe_attacker_name = self._safe_label_component(attacker_name)
 
-            clip_label = f"{demo_name}_{group_idx:04d}_{attacker_name}"
+            clip_label = f"{demo_name}_{group_idx:04d}_{safe_attacker_name}"
             # Build an absolute, unix-style path for the MIRV stream name.
             clip_path_unix = _to_unix_path(output_dir / clip_label)
 
@@ -182,7 +197,17 @@ class SequenceBuilder:
             # ----------------------------------------------------------
             # Prefer entity slot if we have it (spec_player <slot>).
             # Fall back to account-ID based command, or plain spec_mode 1.
-            slot = self.player_slots.get(attacker_name)
+            attacker_steamid_key = None
+            if attacker_steamid_col:
+                steamid_value = first_row.get(attacker_steamid_col)
+                if steamid_value is not None and not pd.isna(steamid_value):
+                    attacker_steamid_key = str(steamid_value)
+
+            slot = None
+            if attacker_steamid_key is not None:
+                slot = self.player_slots.get(attacker_steamid_key)
+            if slot is None:
+                slot = self.player_slots.get(attacker_name)
             if slot is not None:
                 spec_cmd = f"spec_player {slot}"
             elif attacker_steamid_col and not pd.isna(first_row.get(attacker_steamid_col)):
@@ -204,43 +229,47 @@ class SequenceBuilder:
 
             actions: list[dict[str, Any]] = [
                 # ---- Global setup (tick 64) ----
-                {"tick": global_setup_tick, "cmd": "sv_cheats 1"},
-                {"tick": global_setup_tick, "cmd": "volume 1"},
-                {"tick": global_setup_tick, "cmd": "cl_hud_telemetry_frametime_show 0"},
-                {"tick": global_setup_tick, "cmd": "cl_hud_telemetry_net_misdelivery_show 0"},
-                {"tick": global_setup_tick, "cmd": "cl_hud_telemetry_ping_show 0"},
-                {"tick": global_setup_tick, "cmd": "cl_hud_telemetry_serverrecvmargin_graph_show 0"},
-                {"tick": global_setup_tick, "cmd": "r_show_build_info 0"},
-                {"tick": global_setup_tick, "cmd": "cl_draw_only_deathnotices 1"},
-                {"tick": global_setup_tick, "cmd": "mirv_deathmsg lifetime 5"},
-                {"tick": global_setup_tick, "cmd": "mirv_deathmsg filter clear"},
-                {"tick": global_setup_tick, "cmd": "demo_ui_mode 0"},
-                {"tick": global_setup_tick, "cmd": "demo_timescale 1"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "sv_cheats 1"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "volume 1"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_hud_telemetry_frametime_show 0"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_hud_telemetry_net_misdelivery_show 0"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_hud_telemetry_ping_show 0"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_hud_telemetry_serverrecvmargin_graph_show 0"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "r_show_build_info 0"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_draw_only_deathnotices 1"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_deathmsg lifetime 5"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_deathmsg filter clear"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "demo_ui_mode 0"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "demo_timescale 1"},
                 # ---- Jump to just before setup_tick ----
-                # Tick 1 so this fires immediately and jumps forward.
-                {"tick": 1, "cmd": "demo_gototick " + str(setup_tick - 1)},
+                # CS2 sequence actions do not reliably execute before tick 64,
+                # so emit the first jump at the minimum valid action tick.
+                {
+                    "tick": self._valid_tick(global_setup_tick),
+                    "cmd": "demo_gototick " + str(self._valid_tick(setup_tick - 1)),
+                },
                 # ---- Per-clip setup (setup_tick) ----
-                {"tick": setup_tick, "cmd": "mirv_deathmsg clear"},
-                {"tick": setup_tick, "cmd": "spec_show_xray 0"},
+                {"tick": self._valid_tick(setup_tick), "cmd": "mirv_deathmsg clear"},
+                {"tick": self._valid_tick(setup_tick), "cmd": "spec_show_xray 0"},
                 # First-person POV locked to the killer
-                {"tick": setup_tick, "cmd": spec_cmd},
-                {"tick": setup_tick, "cmd": "spec_mode 6"},
-                {"tick": setup_tick, "cmd": "spec_autodirector 0"},
+                {"tick": self._valid_tick(setup_tick), "cmd": spec_cmd},
+                {"tick": self._valid_tick(setup_tick), "cmd": "spec_mode 6"},
+                {"tick": self._valid_tick(setup_tick), "cmd": "spec_autodirector 0"},
                 # ---- Pause just before recording to clear loading screen ----
-                {"tick": pause_tick, "cmd": "pause_playback"},
+                {"tick": self._valid_tick(pause_tick), "cmd": "pause_playback"},
                 # ---- Recording via startmovie/endmovie (HLAE hooks this) ----
                 {
-                    "tick": start_tick,
+                    "tick": self._valid_tick(start_tick),
                     "cmd": "host_framerate " + str(self.framerate),
                 },
                 {
-                    "tick": start_tick,
+                    "tick": self._valid_tick(start_tick),
                     "cmd": 'startmovie "' + clip_path_unix + '" tga',
                 },
-                {"tick": end_tick, "cmd": "endmovie"},
-                {"tick": end_tick, "cmd": "host_framerate 0"},
+                {"tick": self._valid_tick(end_tick), "cmd": "endmovie"},
+                {"tick": self._valid_tick(end_tick), "cmd": "host_framerate 0"},
                 # ---- Advance to next sequence ----
-                {"tick": next_seq_tick, "cmd": "go_to_next_sequence"},
+                {"tick": self._valid_tick(next_seq_tick), "cmd": "go_to_next_sequence"},
             ]
 
             # Sort actions by tick (they should already be, but be safe)
@@ -280,6 +309,33 @@ class SequenceBuilder:
     def _ticks_from_seconds(self, seconds: float) -> int:
         """Convert seconds to an integer tick count at the current tickrate."""
         return round(self.tickrate * seconds)
+
+    def _valid_tick(self, tick: int) -> int:
+        """Clamp an action tick to the minimum value accepted by the plugin."""
+        return max(self._MIN_VALID_TICK, int(tick))
+
+    @staticmethod
+    def _attacker_key(
+        row: Any,
+        attacker_key_col: str | None,
+        attacker_col: str | None,
+    ) -> str:
+        """Return a stable grouping key for the clip POV."""
+        if attacker_key_col:
+            value = row.get(attacker_key_col)
+            if value is not None and not pd.isna(value):
+                return str(value)
+        if attacker_col:
+            value = row.get(attacker_col)
+            if value is not None and not pd.isna(value):
+                return str(value)
+        return "unknown"
+
+    @staticmethod
+    def _safe_label_component(value: str) -> str:
+        """Sanitize user-controlled clip label text for paths and commands."""
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+        return sanitized or "unknown"
 
     @staticmethod
     def _find_col(df: pd.DataFrame, name: str) -> str | None:

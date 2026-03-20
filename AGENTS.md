@@ -2,77 +2,80 @@
 
 ## Project Purpose
 
-CS2 auto-broadcast replay creator. Parses CS2 `.dem` files, filters kill
-events with a natural-language query, generates a JSON sequences file for the
-CS Demo Manager CS2 server plugin, and optionally drives CS2 + HLAE to record
-video clips automatically.
+CS2 auto-broadcast replay creator. It parses CS2 `.dem` files, filters kill
+events, generates a JSON sequences file for the CS Demo Manager CS2 server
+plugin, optionally launches CS2 + HLAE to record clips, and encodes recorded
+frames into MP4 output.
 
 ---
 
 ## Architecture
 
-```
+```text
 src/frag_demo/
-  cli.py              Click CLI (entry point: frag-demo)
+  app.py              Flask desktop web UI entry point (console script: frag-demo)
   parser/
     demo_parser.py    DemoAnalyzer — wraps demoparser2
   query/
-    engine.py         QueryEngine — filter & NL query
+    engine.py         QueryEngine — structured filters + natural-language parsing
   sequences/
-    builder.py        SequenceBuilder — generates JSON actions file
+    builder.py        SequenceBuilder — generates JSON actions files
   launcher/
-    cs2.py            CS2Launcher — HLAE + CS2 launch helper
+    cs2.py            CS2Launcher — HLAE + CS2 launch/helper logic
   encoder/
-    ffmpeg.py         VideoEncoder — ffmpeg TGA→MP4 + concat
+    ffmpeg.py         VideoEncoder — TGA/WAV -> MP4 + concat
+  static/
+    app.js            Web UI behavior
+    style.css         Web UI styling
+  templates/
+    index.html        Web UI shell
 tests/
-  test_query.py       QueryEngine unit tests (no .dem file needed)
-  test_sequences.py   SequenceBuilder unit tests (no .dem file needed)
+  test_app.py         Flask app API unit tests
+  test_encoder.py     VideoEncoder unit tests
+  test_launcher.py    CS2Launcher unit tests
+  test_parser.py      DemoAnalyzer unit tests
+  test_query.py       QueryEngine unit tests
+  test_sequences.py   SequenceBuilder unit tests
 ```
 
 Data flow:
-  DemoAnalyzer → kills DataFrame → QueryEngine → filtered DataFrame
-  → SequenceBuilder → JSON actions file → CS2Launcher → records clips
-  → VideoEncoder → final MP4
+  DemoAnalyzer -> kills DataFrame -> QueryEngine -> filtered DataFrame
+  -> SequenceBuilder -> JSON actions file -> CS2Launcher -> recorded clips
+  -> VideoEncoder -> final MP4
 
 ---
 
 ## Build & Run Commands
 
 ```bash
-# Install in editable mode with dev tools
+# Create and activate a local virtualenv, then install in editable mode
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Run tests
 pytest
 
-# CLI help
-frag-demo --help
-frag-demo record --help
-
-# Show demo header
-frag-demo info match.dem
-
-# Dry-run query (no file written)
-frag-demo record match.dem zywoo awp --dry-run
-
-# Generate sequences JSON
-frag-demo record match.dem s1mple headshot
+# Start the local web UI
+frag-demo
 ```
+
+The app runs a local Flask server at `http://127.0.0.1:5000`.
+On Windows PowerShell, activate the virtualenv with `.\.venv\Scripts\Activate.ps1`.
 
 ---
 
 ## Key Conventions
 
-- Python ≥ 3.10; use `from __future__ import annotations` for PEP 604 unions.
-- Type hints on all public methods; use `pathlib.Path` for file paths.
+- Python >= 3.10; use `from __future__ import annotations` in Python modules.
+- Type hints on all public methods; use `pathlib.Path` for filesystem paths.
 - DataFrame column names follow demoparser2 output: `attacker_name`,
   `attacker_steamid`, `attacker_team_name`, `user_name`, `weapon`,
   `headshot`, `tick`, `total_rounds_played`, `is_warmup_period`.
-- Tests are fully self-contained (no `.dem` file required); use synthetic
-  DataFrames and `tmp_path` for file I/O tests.
+- Tests should stay self-contained; use synthetic DataFrames and `tmp_path`
+  instead of real demo files.
 - The sequences JSON format is a list of `{"actions": [...]}` objects where
-  each action has `"tick"` (int) and `"cmd"` (str) keys, sorted ascending
-  by tick.
+  each action has `"tick"` (int) and `"cmd"` (str), sorted ascending by tick.
 - Kills within 10 seconds of each other are grouped into a single sequence.
 - `SequenceBuilder._ticks_from_seconds()` uses `round(tickrate * seconds)`.
 
@@ -80,25 +83,26 @@ frag-demo record match.dem s1mple headshot
 
 ## Plugin Installation Details
 
-`CS2Launcher.install_plugin()` copies `server.dll` to **two** locations inside
-the `csgo/csdm` subtree so that CS2's different search paths are both satisfied:
+`CS2Launcher.install_plugin()` copies `server.dll` to two locations under the
+`csgo/csdm` subtree so both CS2 search paths are satisfied:
 
 | Destination | Why |
 |---|---|
 | `game/csgo/csdm/bin/server.dll` | Legacy / generic bin search path |
-| `game/csgo/csdm/bin/win64/server.dll` | CS2's real `server.dll` path (mirrors `game/bin/win64/`) |
+| `game/csgo/csdm/bin/win64/server.dll` | CS2's real `server.dll` path |
 
 `gameinfo.gi` is patched to prepend `Game\tcsgo/csdm` before the existing
-`Game\tcsgo` entry so CS2 discovers the plugin directory at startup.  A
+`Game\tcsgo` entry so CS2 discovers the plugin directory at startup. A
 `.backup` copy is created before patching and restored by `uninstall_plugin()`.
 
 ---
 
 ## Dependencies
 
-| Package       | Purpose                       |
-|---------------|-------------------------------|
-| demoparser2   | Parse CS2 .dem files          |
-| click         | CLI framework                 |
-| pandas        | DataFrames for kill events    |
-| pytest (dev)  | Unit testing                  |
+| Package       | Purpose                              |
+|---------------|--------------------------------------|
+| demoparser2   | Parse CS2 `.dem` files               |
+| flask         | Local desktop web UI                 |
+| numpy         | JSON-safe numeric cleanup in the UI  |
+| pandas        | DataFrames for kill events           |
+| pytest (dev)  | Unit testing                         |

@@ -1,6 +1,5 @@
 """Download CS2 demos from HLTV using Playwright to bypass Cloudflare."""
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -16,7 +15,7 @@ def get_hltv_match_links(page, max_links: int = 5) -> list[str]:
     """Extract match page URLs from HLTV results page."""
     links = page.eval_on_selector_all(
         "a",
-        """els => els.map(e => e.href)
+        r"""els => els.map(e => e.href)
             .filter(h => /\/matches\/\d+\//.test(h))
             .filter((v, i, a) => a.indexOf(v) === i)""",
     )
@@ -81,16 +80,14 @@ def main():
                 break
 
         match_links = get_hltv_match_links(page, max_links=num_demos + 5)
-        print(f"
-Found {len(match_links)} match links")
+        print(f"\nFound {len(match_links)} match links")
 
         downloaded = 0
         for i, match_url in enumerate(match_links):
             if downloaded >= num_demos:
                 break
 
-            print(f"
-[{i+1}] Checking: {match_url}")
+            print(f"\n[{i+1}] Checking: {match_url}")
             try:
                 demo_url = get_demo_download_url(page, match_url)
                 if not demo_url:
@@ -105,8 +102,7 @@ Found {len(match_links)} match links")
 
         browser.close()
 
-    print(f"
-Done! Downloaded {downloaded} demos to {DEMOS_DIR}")
+    print(f"\nDone! Downloaded {downloaded} demos to {DEMOS_DIR}")
 
 
 if __name__ == "__main__":

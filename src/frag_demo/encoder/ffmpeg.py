@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -54,6 +55,9 @@ class VideoEncoder:
             has_audio: When ``True`` look for ``audio.wav`` alongside the
                 frames and mux it into the output.
         """
+        if framerate <= 0:
+            raise ValueError("framerate must be positive")
+
         in_dir = Path(input_dir)
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -67,19 +71,7 @@ class VideoEncoder:
         if not tga_files:
             raise FileNotFoundError(f"No TGA frames found in {in_dir}")
 
-        first_name = tga_files[0].stem  # e.g. "00000" or "frame00000"
-        # Extract the numeric part to determine the pattern
-        import re
-        m = re.match(r"^(.*?)(\d+)$", first_name)
-        if m:
-            prefix = m.group(1)
-            digits = len(m.group(2))
-            start_number = int(m.group(2))
-            frame_pattern = str(in_dir / f"{prefix}%0{digits}d.tga")
-        else:
-            # Fallback: assume sequential 5-digit numbering
-            frame_pattern = str(in_dir / "%05d.tga")
-            start_number = 0
+        frame_pattern, start_number = self._detect_frame_sequence(in_dir, tga_files)
 
         args: list[str] = [
             self.ffmpeg_path,
@@ -89,8 +81,13 @@ class VideoEncoder:
             "-i", frame_pattern,
         ]
 
+        audio_input = "none"
         if has_audio and wav_path.exists():
             args += ["-i", str(wav_path)]
+            audio_input = "file"
+        elif has_audio:
+            args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+            audio_input = "silent"
 
         args += [
             "-c:v", self.video_codec,
@@ -99,8 +96,10 @@ class VideoEncoder:
             "-movflags", "+faststart",
         ]
 
-        if has_audio and wav_path.exists():
+        if audio_input != "none":
             args += ["-c:a", self.audio_codec]
+            if audio_input == "silent":
+                args += ["-shortest"]
         else:
             args += ["-an"]
 
@@ -130,9 +129,7 @@ class VideoEncoder:
         ) as fh:
             concat_list_path = fh.name
             for vp in video_paths:
-                # ffmpeg concat list uses forward slashes and single-quoted paths
-                escaped = str(Path(vp).resolve()).replace("'", r"'")
-                fh.write("file '" + escaped + "'\n")
+                fh.write("file " + self._escape_ffconcat_path(Path(vp)) + "\n")
 
         try:
             args: list[str] = [
@@ -177,3 +174,40 @@ class VideoEncoder:
                 args,
                 output=result.stdout,
             )
+
+    @staticmethod
+    def _detect_frame_sequence(in_dir: Path, tga_files: list[Path]) -> tuple[str, int]:
+        """Infer the ffmpeg frame pattern from the available TGA files."""
+        groups: dict[tuple[str, int], list[int]] = {}
+
+        for tga_file in tga_files:
+            match = re.match(r"^(.*?)(\d+)$", tga_file.stem)
+            if match is None:
+                continue
+
+            prefix = match.group(1)
+            digits = len(match.group(2))
+            number = int(match.group(2))
+            groups.setdefault((prefix, digits), []).append(number)
+
+        if not groups:
+            return str(in_dir / "%05d.tga"), 0
+
+        ranked_groups = sorted(
+            groups.items(),
+            key=lambda item: (-len(item[1]), min(item[1]), item[0][0], item[0][1]),
+        )
+        (prefix, digits), frame_numbers = ranked_groups[0]
+
+        if len(ranked_groups) > 1 and len(ranked_groups[1][1]) == len(frame_numbers):
+            raise ValueError(
+                f"Ambiguous TGA frame sequences found in {in_dir}: {sorted(groups)}"
+            )
+
+        frame_pattern = str(in_dir / f"{prefix}%0{digits}d.tga")
+        return frame_pattern, min(frame_numbers)
+
+    @staticmethod
+    def _escape_ffconcat_path(path: Path) -> str:
+        """Return a quoted ffconcat-safe path using forward slashes."""
+        return "'" + path.resolve().as_posix().replace("'", r"'\''") + "'"

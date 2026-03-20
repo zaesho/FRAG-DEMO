@@ -1,3 +1,4 @@
 demoparser2
 flask
+numpy
 pandas

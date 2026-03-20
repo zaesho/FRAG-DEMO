@@ -8,10 +8,6 @@ import pytest
 from frag_demo.query.engine import QueryEngine
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture()
 def sample_kills() -> pd.DataFrame:
     """A small synthetic kills DataFrame matching the demoparser2 schema."""
@@ -19,10 +15,25 @@ def sample_kills() -> pd.DataFrame:
         {
             "tick": [1000, 2000, 3000, 4000, 5000, 6000],
             "attacker_name": ["ZywOo", "s1mple", "NiKo", "ZywOo", "s1mple", "NiKo"],
-            "attacker_steamid": ["76561198025798240"] * 2 + ["76561198049899620"] * 2 + ["76561198025798240"] * 2,
-            # Use full team names so side filtering is unambiguous
-            "attacker_team_name": ["CT", "TERRORIST", "CT", "CT", "TERRORIST", "TERRORIST"],
-            "user_name": ["victim1", "victim2", "victim3", "victim4", "victim5", "victim6"],
+            "attacker_steamid": ["76561198025798240"] * 2
+            + ["76561198049899620"] * 2
+            + ["76561198025798240"] * 2,
+            "attacker_team_name": [
+                "CT",
+                "TERRORIST",
+                "CT",
+                "CT",
+                "TERRORIST",
+                "TERRORIST",
+            ],
+            "user_name": [
+                "victim1",
+                "victim2",
+                "victim3",
+                "victim4",
+                "victim5",
+                "victim6",
+            ],
             "weapon": ["awp", "ak47", "deagle", "awp", "ak47", "m4a1"],
             "headshot": [False, True, True, False, False, True],
             "total_rounds_played": [1, 1, 2, 2, 3, 3],
@@ -35,10 +46,6 @@ def sample_kills() -> pd.DataFrame:
 def engine(sample_kills: pd.DataFrame) -> QueryEngine:
     return QueryEngine(sample_kills)
 
-
-# ---------------------------------------------------------------------------
-# Basic filter tests
-# ---------------------------------------------------------------------------
 
 class TestFilterByPlayer:
     def test_exact_match(self, engine: QueryEngine) -> None:
@@ -59,6 +66,18 @@ class TestFilterByPlayer:
         result = engine.query(player="nonexistent_player_xyz")
         assert result.empty
 
+    def test_regex_characters_are_treated_literally(self) -> None:
+        kills = pd.DataFrame(
+            {
+                "attacker_name": ["broky+", "brokyyy"],
+                "weapon": ["awp", "awp"],
+                "attacker_team_name": ["CT", "CT"],
+            }
+        )
+        result = QueryEngine(kills).query(player="broky+")
+        assert len(result) == 1
+        assert result.iloc[0]["attacker_name"] == "broky+"
+
 
 class TestFilterByWeapon:
     def test_exact_weapon(self, engine: QueryEngine) -> None:
@@ -67,12 +86,15 @@ class TestFilterByWeapon:
         assert all(result["weapon"] == "awp")
 
     def test_partial_weapon(self, engine: QueryEngine) -> None:
-        # "ak" should match "ak47"
         result = engine.query(weapon="ak")
         assert len(result) == 2
 
     def test_pipe_separated_alternatives(self, engine: QueryEngine) -> None:
         result = engine.query(weapon="awp|deagle")
+        assert len(result) == 3
+
+    def test_comma_separated_alternatives(self, engine: QueryEngine) -> None:
+        result = engine.query(weapon="awp,deagle")
         assert len(result) == 3
 
     def test_case_insensitive_weapon(self, engine: QueryEngine) -> None:
@@ -110,12 +132,10 @@ class TestFilterByRound:
 class TestFilterBySide:
     def test_ct_side(self, engine: QueryEngine) -> None:
         result = engine.query(side="CT")
-        # CT kills: ZywOo(1000), NiKo(3000), ZywOo(4000) = 3 rows
         assert len(result) == 3
         assert all(result["attacker_team_name"] == "CT")
 
     def test_t_side(self, engine: QueryEngine) -> None:
-        # T side: s1mple(2000, 5000), NiKo(6000) = 3 rows
         result = engine.query(side="TERRORIST")
         assert len(result) == 3
 
@@ -124,10 +144,11 @@ class TestFilterBySide:
         result_lower = engine.query(side="terrorist")
         assert len(result_upper) == len(result_lower) == 3
 
+    def test_short_t_alias_does_not_match_ct(self, engine: QueryEngine) -> None:
+        result = engine.query(side="T")
+        assert len(result) == 3
+        assert all(result["attacker_team_name"] == "TERRORIST")
 
-# ---------------------------------------------------------------------------
-# Combined filter tests
-# ---------------------------------------------------------------------------
 
 class TestCombinedFilters:
     def test_player_and_weapon(self, engine: QueryEngine) -> None:
@@ -143,10 +164,6 @@ class TestCombinedFilters:
         assert result.empty
 
 
-# ---------------------------------------------------------------------------
-# Empty DataFrame edge case
-# ---------------------------------------------------------------------------
-
 class TestEmptyQuery:
     def test_empty_query_returns_all(self, engine: QueryEngine) -> None:
         result = engine.parse_natural_query("")
@@ -161,10 +178,6 @@ class TestEmptyQuery:
         result = engine.parse_natural_query("   ")
         assert len(result) == 6
 
-
-# ---------------------------------------------------------------------------
-# Natural language query tests
-# ---------------------------------------------------------------------------
 
 class TestParseNaturalQuery:
     def test_player_only(self, engine: QueryEngine) -> None:
@@ -197,7 +210,7 @@ class TestParseNaturalQuery:
         result = engine.parse_natural_query("s1mple hs")
         assert len(result) == 1
         assert result.iloc[0]["attacker_name"] == "s1mple"
-        assert result.iloc[0]["headshot"] == True  # noqa: E712 (numpy bool_ compat)
+        assert result.iloc[0]["headshot"] == True  # noqa: E712
 
     def test_round_keyword(self, engine: QueryEngine) -> None:
         result = engine.parse_natural_query("round 2")
@@ -205,7 +218,6 @@ class TestParseNaturalQuery:
         assert all(result["total_rounds_played"] == 2)
 
     def test_player_weapon_with_aliases(self, engine: QueryEngine) -> None:
-        # "deag" should resolve to "deagle"
         result = engine.parse_natural_query("NiKo deag")
         assert len(result) == 1
         assert result.iloc[0]["weapon"] == "deagle"
@@ -216,19 +228,30 @@ class TestParseNaturalQuery:
         assert result.iloc[0]["weapon"] == "deagle"
 
     def test_weapon_alias_ak(self, engine: QueryEngine) -> None:
-        # "ak" alias → "ak47"
         result = engine.parse_natural_query("ak")
         assert len(result) == 2
         assert all(result["weapon"] == "ak47")
 
     def test_weapon_alias_m4(self, engine: QueryEngine) -> None:
-        # "m4" alias → "m4a1" or "m4a1_silencer"
         result = engine.parse_natural_query("m4")
-        assert len(result) == 1  # one m4a1 kill in sample data
+        assert len(result) == 1
+        assert result.iloc[0]["weapon"] == "m4a1"
+
+    def test_canonical_weapon_query_is_exact(self) -> None:
+        kills = pd.DataFrame(
+            {
+                "attacker_name": ["NiKo", "NiKo"],
+                "weapon": ["m4a1", "m4a1_silencer"],
+                "attacker_team_name": ["CT", "CT"],
+                "headshot": [False, False],
+                "total_rounds_played": [1, 1],
+            }
+        )
+        result = QueryEngine(kills).parse_natural_query("m4a1")
+        assert len(result) == 1
         assert result.iloc[0]["weapon"] == "m4a1"
 
     def test_ct_side_filter(self, engine: QueryEngine) -> None:
-        # CT players (ZywOo, NiKo) didn't use ak47 — only T-side players (s1mple) did
         result = engine.parse_natural_query("ct ak")
         assert result.empty
 
@@ -238,9 +261,18 @@ class TestParseNaturalQuery:
         assert result.iloc[0]["attacker_name"] == "s1mple"
         assert result.iloc[0]["total_rounds_played"] == 1
 
+    def test_invalid_round_clause_is_ignored(self, engine: QueryEngine) -> None:
+        result = engine.parse_natural_query("NiKo round five")
+        assert len(result) == 2
+        assert all(result["attacker_name"] == "NiKo")
+
+    def test_punctuation_is_ignored_while_parsing(self, engine: QueryEngine) -> None:
+        result = engine.parse_natural_query("NiKo, deag!")
+        assert len(result) == 1
+        assert result.iloc[0]["weapon"] == "deagle"
+
     def test_full_complex_query(self, engine: QueryEngine) -> None:
-        # "s1mple headshot kills" → s1mple + hs
         result = engine.parse_natural_query("s1mple headshot kills")
         assert len(result) == 1
         assert result.iloc[0]["attacker_name"] == "s1mple"
-        assert result.iloc[0]["headshot"] == True  # noqa: E712 (numpy bool_ compat)
+        assert result.iloc[0]["headshot"] == True  # noqa: E712
