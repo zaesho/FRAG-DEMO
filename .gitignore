@@ -10,6 +10,7 @@ build/
 .venv/
 venv/
 env/
+node_modules/
 
 # Demo files (large binaries)
 *.dem
@@ -29,3 +30,5 @@ Desktop.ini
 # Recordings output
 recordings/
 
+# Local app state
+.frag-demo/

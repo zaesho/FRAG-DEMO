@@ -30,6 +30,10 @@ body {
     min-height: 100%;
 }
 
+#root {
+    min-height: 100vh;
+}
+
 body {
     background:
         radial-gradient(1200px 480px at -20% -20%, rgba(66, 113, 188, 0.18), transparent 60%),
@@ -227,6 +231,35 @@ body {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
     gap: 6px;
+}
+
+.integration-grid {
+    display: grid;
+    gap: 7px;
+}
+
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 0.83rem;
+}
+
+.toggle-row input {
+    width: auto;
+}
+
+.integration-status {
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--bg-soft);
+    color: var(--text-secondary);
+    font-size: 0.77rem;
+    line-height: 1.45;
+    padding: 8px;
+    min-height: 48px;
+    word-break: break-word;
 }
 
 .sidebar-footer {
