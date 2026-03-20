@@ -223,6 +223,84 @@ class TestLibrary:
         assert library_payload["selected_demo_path"] == str(demo_path.resolve())
 
 
+class TestKills:
+    def test_kills_filters_by_round_range(self, client) -> None:
+        app_module._state["kills_df"] = pd.DataFrame(
+            [
+                {
+                    app_module._KILL_ID_COL: 0,
+                    "tick": 1000,
+                    "attacker_name": "NiKo",
+                    "weapon": "ak47",
+                    "total_rounds_played": 1,
+                },
+                {
+                    app_module._KILL_ID_COL: 1,
+                    "tick": 2000,
+                    "attacker_name": "NiKo",
+                    "weapon": "ak47",
+                    "total_rounds_played": 2,
+                },
+                {
+                    app_module._KILL_ID_COL: 2,
+                    "tick": 3000,
+                    "attacker_name": "NiKo",
+                    "weapon": "ak47",
+                    "total_rounds_played": 3,
+                },
+            ]
+        )
+
+        response = client.post(
+            "/api/kills",
+            json={"round_start": 2, "round_end": 3},
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["ok"] is True
+        assert payload["total"] == 2
+        assert [kill["total_rounds_played"] for kill in payload["kills"]] == [2, 3]
+
+    def test_kills_round_range_tolerates_reversed_bounds(self, client) -> None:
+        app_module._state["kills_df"] = pd.DataFrame(
+            [
+                {
+                    app_module._KILL_ID_COL: 0,
+                    "tick": 1000,
+                    "attacker_name": "NiKo",
+                    "weapon": "ak47",
+                    "total_rounds_played": 1,
+                },
+                {
+                    app_module._KILL_ID_COL: 1,
+                    "tick": 2000,
+                    "attacker_name": "NiKo",
+                    "weapon": "ak47",
+                    "total_rounds_played": 2,
+                },
+                {
+                    app_module._KILL_ID_COL: 2,
+                    "tick": 3000,
+                    "attacker_name": "NiKo",
+                    "weapon": "ak47",
+                    "total_rounds_played": 3,
+                },
+            ]
+        )
+
+        response = client.post(
+            "/api/kills",
+            json={"round_start": 3, "round_end": 2},
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["ok"] is True
+        assert payload["total"] == 2
+        assert [kill["total_rounds_played"] for kill in payload["kills"]] == [2, 3]
+
+
 class TestRecord:
     def test_selected_ids_pick_only_requested_rows(
         self, client, tmp_path: Path, monkeypatch

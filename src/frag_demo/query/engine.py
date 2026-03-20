@@ -91,6 +91,8 @@ class QueryEngine:
         weapon: str | None = None,
         headshot: bool | None = None,
         round_num: int | None = None,
+        round_start: int | None = None,
+        round_end: int | None = None,
         side: str | None = None,
     ) -> pd.DataFrame:
         """Filter kills based on criteria.
@@ -104,6 +106,8 @@ class QueryEngine:
             headshot: When ``True`` return only headshots; ``False``
                 returns only non-headshots.
             round_num: Filter by ``total_rounds_played`` value.
+            round_start: Inclusive lower bound for ``total_rounds_played``.
+            round_end: Inclusive upper bound for ``total_rounds_played``.
             side: Case-insensitive match against
                 ``attacker_team_name`` (e.g. ``"CT"`` or ``"T"``).
 
@@ -143,6 +147,17 @@ class QueryEngine:
             col = self._find_col(df, "total_rounds_played")
             if col:
                 df = df[df[col] == round_num]
+        elif round_start is not None or round_end is not None:
+            col = self._find_col(df, "total_rounds_played")
+            if col:
+                start = round_start
+                end = round_end
+                if start is not None and end is not None and start > end:
+                    start, end = end, start
+                if start is not None:
+                    df = df[df[col] >= start]
+                if end is not None:
+                    df = df[df[col] <= end]
 
         if side is not None:
             col = self._find_col(df, "attacker_team_name")

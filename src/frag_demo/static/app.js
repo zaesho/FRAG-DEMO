@@ -447,7 +447,9 @@ async function loadDemo() {
 
         populateSelect("#filter-player", data.players || []);
         populateSelect("#filter-weapon", data.weapons || []);
-        populateSelect("#filter-round", (data.rounds || []).map(String));
+        const roundOptions = (data.rounds || []).map(String);
+        populateSelect("#filter-round-start", roundOptions);
+        populateSelect("#filter-round-end", roundOptions);
 
         updateStatus(true, header.map_name || "?");
 
@@ -506,8 +508,10 @@ async function fetchKills() {
     const player = $("#filter-player").value || null;
     const weapon = $("#filter-weapon").value || null;
     const headshot = $("#filter-headshot").checked ? true : null;
-    const roundVal = $("#filter-round").value;
-    const round_num = roundVal ? parseInt(roundVal, 10) : null;
+    const roundStartVal = $("#filter-round-start").value;
+    const roundEndVal = $("#filter-round-end").value;
+    const round_start = roundStartVal ? parseInt(roundStartVal, 10) : null;
+    const round_end = roundEndVal ? parseInt(roundEndVal, 10) : null;
     const side = $("#filter-side").value || null;
 
     try {
@@ -515,7 +519,8 @@ async function fetchKills() {
             player,
             weapon,
             headshot,
-            round_num,
+            round_start,
+            round_end,
             side,
         });
 
@@ -535,7 +540,8 @@ function clearFilters() {
     $("#filter-player").value = "";
     $("#filter-weapon").value = "";
     $("#filter-headshot").checked = false;
-    $("#filter-round").value = "";
+    $("#filter-round-start").value = "";
+    $("#filter-round-end").value = "";
     $("#filter-side").value = "";
     void fetchKills();
 }
@@ -879,7 +885,7 @@ async function encodeClips() {
 
 // -- Init --
 document.addEventListener("DOMContentLoaded", () => {
-    $$("#filter-player, #filter-weapon, #filter-round, #filter-side").forEach(
+    $$("#filter-player, #filter-weapon, #filter-round-start, #filter-round-end, #filter-side").forEach(
         (el) => el.addEventListener("change", fetchKills),
     );
     $("#filter-headshot").addEventListener("change", fetchKills);

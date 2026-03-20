@@ -841,6 +841,8 @@ def api_kills():
     weapon = data.get("weapon") or None
     headshot = data.get("headshot")  # True, False, or None
     round_num = data.get("round_num")
+    round_start = data.get("round_start")
+    round_end = data.get("round_end")
     side = data.get("side") or None
 
     if round_num is not None:
@@ -848,6 +850,18 @@ def api_kills():
             round_num = int(round_num)
         except (ValueError, TypeError):
             round_num = None
+
+    if round_start is not None:
+        try:
+            round_start = int(round_start)
+        except (ValueError, TypeError):
+            round_start = None
+
+    if round_end is not None:
+        try:
+            round_end = int(round_end)
+        except (ValueError, TypeError):
+            round_end = None
 
     try:
         headshot = _parse_bool(headshot, None)
@@ -860,6 +874,8 @@ def api_kills():
         weapon=weapon,
         headshot=headshot,
         round_num=round_num,
+        round_start=round_start,
+        round_end=round_end,
         side=side,
     )
 
