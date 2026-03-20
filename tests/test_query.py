@@ -124,6 +124,26 @@ class TestFilterByRound:
         assert len(result) == 2
         assert all(result["total_rounds_played"] == 1)
 
+    def test_round_range(self, engine: QueryEngine) -> None:
+        result = engine.query(round_start=2, round_end=3)
+        assert len(result) == 4
+        assert result["total_rounds_played"].tolist() == [2, 2, 3, 3]
+
+    def test_round_range_with_only_lower_bound(self, engine: QueryEngine) -> None:
+        result = engine.query(round_start=2)
+        assert len(result) == 4
+        assert result["total_rounds_played"].tolist() == [2, 2, 3, 3]
+
+    def test_round_range_with_only_upper_bound(self, engine: QueryEngine) -> None:
+        result = engine.query(round_end=2)
+        assert len(result) == 4
+        assert result["total_rounds_played"].tolist() == [1, 1, 2, 2]
+
+    def test_round_range_swaps_reversed_bounds(self, engine: QueryEngine) -> None:
+        result = engine.query(round_start=3, round_end=2)
+        assert len(result) == 4
+        assert result["total_rounds_played"].tolist() == [2, 2, 3, 3]
+
     def test_nonexistent_round(self, engine: QueryEngine) -> None:
         result = engine.query(round_num=99)
         assert result.empty
