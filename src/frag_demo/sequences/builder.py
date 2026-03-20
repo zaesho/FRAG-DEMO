@@ -33,8 +33,8 @@ class SequenceBuilder:
     3. At **setup_tick** — per-clip setup (stream name, fps, clear death msgs,
        spectate target).
     4. At **start_tick - 4** — ``pause_playback`` so the loading screen clears.
-    5. At **start_tick** — ``mirv_streams record start``.
-    6. At **end_tick** — ``mirv_streams record end``.
+    5. At **start_tick** — record start command.
+    6. At **end_tick** — record end command.
     7. At **end_tick + 64** — ``go_to_next_sequence``.
 
     Example output format::
@@ -227,6 +227,13 @@ class SequenceBuilder:
             # Tick 64 — global one-time setup (mirrors getValidTick floor).
             global_setup_tick = self._MIN_VALID_TICK
 
+            if self.recording_system == "hlae":
+                record_start_cmd = "mirv_streams record start"
+                record_end_cmd = "mirv_streams record end"
+            else:
+                record_start_cmd = 'startmovie "' + clip_path_unix + '" tga'
+                record_end_cmd = "endmovie"
+
             actions: list[dict[str, Any]] = [
                 # ---- Global setup (tick 64) ----
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "sv_cheats 1"},
@@ -241,6 +248,7 @@ class SequenceBuilder:
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_deathmsg filter clear"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "demo_ui_mode 0"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "demo_timescale 1"},
+                {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_streams record screen enabled 1"},
                 # ---- Jump to just before setup_tick ----
                 # CS2 sequence actions do not reliably execute before tick 64,
                 # so emit the first jump at the minimum valid action tick.
@@ -257,16 +265,19 @@ class SequenceBuilder:
                 {"tick": self._valid_tick(setup_tick), "cmd": "spec_autodirector 0"},
                 # ---- Pause just before recording to clear loading screen ----
                 {"tick": self._valid_tick(pause_tick), "cmd": "pause_playback"},
-                # ---- Recording via startmovie/endmovie (HLAE hooks this) ----
+                {
+                    "tick": self._valid_tick(setup_tick),
+                    "cmd": "mirv_streams record name " + '"' + clip_path_unix + '"',
+                },
                 {
                     "tick": self._valid_tick(start_tick),
                     "cmd": "host_framerate " + str(self.framerate),
                 },
                 {
                     "tick": self._valid_tick(start_tick),
-                    "cmd": 'startmovie "' + clip_path_unix + '" tga',
+                    "cmd": record_start_cmd,
                 },
-                {"tick": self._valid_tick(end_tick), "cmd": "endmovie"},
+                {"tick": self._valid_tick(end_tick), "cmd": record_end_cmd},
                 {"tick": self._valid_tick(end_tick), "cmd": "host_framerate 0"},
                 # ---- Advance to next sequence ----
                 {"tick": self._valid_tick(next_seq_tick), "cmd": "go_to_next_sequence"},

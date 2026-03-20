@@ -81,6 +81,27 @@ class TestGetPlayers:
 
 
 class TestGetPlayerSlots:
+    def test_player_slots_prefer_user_id_plus_one(self) -> None:
+        analyzer = DemoAnalyzer.__new__(DemoAnalyzer)
+        analyzer.parser = _FakeParser(
+            pd.DataFrame(),
+            {
+                128: pd.DataFrame(
+                    {
+                        "player_name": ["dup"],
+                        "player_steamid": ["765"],
+                        "user_id": [4],
+                        "entity_id": [99],
+                    }
+                )
+            },
+        )
+
+        result = analyzer.get_player_slots()
+
+        assert result["765"] == 5
+        assert result["dup"] == 5
+
     def test_player_slots_include_steamid_keys(self) -> None:
         analyzer = DemoAnalyzer.__new__(DemoAnalyzer)
         analyzer.parser = _FakeParser(

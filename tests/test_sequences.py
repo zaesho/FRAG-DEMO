@@ -143,8 +143,8 @@ class TestSequenceStructure:
         cmds = {a["cmd"] for a in seqs[0]["actions"]}
 
         assert "sv_cheats 1" in cmds
-        assert any("startmovie" in c for c in cmds)
-        assert any("endmovie" in c for c in cmds)
+        assert "mirv_streams record start" in cmds
+        assert "mirv_streams record end" in cmds
         assert any("go_to_next_sequence" in c for c in cmds)
 
     def test_actions_sorted_by_tick(self, builder: SequenceBuilder) -> None:
@@ -183,10 +183,10 @@ class TestSequenceStructure:
         actions = seqs[0]["actions"]
 
         start_tick = next(
-            a["tick"] for a in actions if "startmovie" in a["cmd"]
+            a["tick"] for a in actions if a["cmd"] == "mirv_streams record start"
         )
         end_tick = next(
-            a["tick"] for a in actions if a["cmd"] == "endmovie"
+            a["tick"] for a in actions if a["cmd"] == "mirv_streams record end"
         )
         assert end_tick > start_tick
 
@@ -196,7 +196,7 @@ class TestSequenceStructure:
         actions = seqs[0]["actions"]
 
         end_tick = next(
-            a["tick"] for a in actions if a["cmd"] == "endmovie"
+            a["tick"] for a in actions if a["cmd"] == "mirv_streams record end"
         )
         next_seq_tick = next(
             a["tick"] for a in actions if a["cmd"] == "go_to_next_sequence"
@@ -210,7 +210,7 @@ class TestSequenceStructure:
         actions = seqs[0]["actions"]
 
         start_tick = next(
-            a["tick"] for a in actions if "startmovie" in a["cmd"]
+            a["tick"] for a in actions if a["cmd"] == "mirv_streams record start"
         )
         assert start_tick < kill_tick
 
@@ -221,31 +221,48 @@ class TestSequenceStructure:
         actions = seqs[0]["actions"]
 
         end_tick = next(
-            a["tick"] for a in actions if a["cmd"] == "endmovie"
+            a["tick"] for a in actions if a["cmd"] == "mirv_streams record end"
         )
         assert end_tick > kill_tick
 
-    def test_startmovie_path_uses_sanitized_attacker_name(
+    def test_record_name_uses_sanitized_attacker_name(
         self, builder: SequenceBuilder
     ) -> None:
         df = pd.DataFrame([_make_kill(tick=10000, attacker='../b:ad"name')])
         seqs = builder.build_sequences(df, "match.dem")
-        startmovie_cmd = next(
-            a["cmd"] for a in seqs[0]["actions"] if a["cmd"].startswith('startmovie "')
+        record_name_cmd = next(
+            a["cmd"]
+            for a in seqs[0]["actions"]
+            if a["cmd"].startswith('mirv_streams record name "')
         )
-        assert "b_ad_name" in startmovie_cmd
-        assert '../b:ad"name' not in startmovie_cmd
+        assert "b_ad_name" in record_name_cmd
+        assert '../b:ad"name' not in record_name_cmd
 
-    def test_startmovie_path_uses_sanitized_demo_name(
+    def test_record_name_uses_sanitized_demo_name(
         self, builder: SequenceBuilder
     ) -> None:
         df = pd.DataFrame([_make_kill(tick=10000)])
         seqs = builder.build_sequences(df, 'bad demo"name?.dem')
-        startmovie_cmd = next(
-            a["cmd"] for a in seqs[0]["actions"] if a["cmd"].startswith('startmovie "')
+        record_name_cmd = next(
+            a["cmd"]
+            for a in seqs[0]["actions"]
+            if a["cmd"].startswith('mirv_streams record name "')
         )
-        assert "bad_demo_name_0000_zywoo" in startmovie_cmd
-        assert 'bad demo"name?' not in startmovie_cmd
+        assert "bad_demo_name_0000_zywoo" in record_name_cmd
+        assert 'bad demo"name?' not in record_name_cmd
+
+    def test_non_hlae_recording_uses_startmovie_endmovie(self, tmp_path: Path) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            recording_system="startmovie",
+        )
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        cmds = {a["cmd"] for a in seqs[0]["actions"]}
+
+        assert any(cmd.startswith('startmovie "') for cmd in cmds)
+        assert "endmovie" in cmds
 
     def test_spec_player_prefers_steamid_mapping_over_name(
         self, tmp_path: Path

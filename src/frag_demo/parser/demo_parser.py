@@ -80,18 +80,22 @@ class DemoAnalyzer:
         for tick in (probe_tick, 64, 1):
             try:
                 df = self.parser.parse_ticks(
-                    ["player_name", "player_steamid", "entity_id"],
+                    ["player_name", "player_steamid", "user_id", "entity_id"],
                     ticks=[tick],
                 )
-                if df is not None and not df.empty and "entity_id" in df.columns:
+                if df is not None and not df.empty:
                     result: dict[str, int] = {}
                     for _, row in df.iterrows():
                         name = str(row.get("player_name", ""))
                         steamid = row.get("player_steamid")
-                        eid = row.get("entity_id")
-                        if eid is None or pd.isna(eid):
+                        user_id = row.get("user_id")
+                        entity_id = row.get("entity_id")
+                        if user_id is not None and not pd.isna(user_id):
+                            slot = int(user_id) + 1
+                        elif entity_id is not None and not pd.isna(entity_id):
+                            slot = int(entity_id)
+                        else:
                             continue
-                        slot = int(eid)
                         if steamid is not None and not pd.isna(steamid):
                             result.setdefault(str(steamid), slot)
                         if name:
