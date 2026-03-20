@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frag-demo"
+version = "0.1.0"
+description = "CS2 auto-broadcast replay creator"
+requires-python = ">=3.10"
+dependencies = [
+    "demoparser2",
+    "flask",
+    "pandas",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+frag-demo = "frag_demo.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

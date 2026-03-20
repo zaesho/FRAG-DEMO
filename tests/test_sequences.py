@@ -1,0 +1,252 @@
+"""Tests for the SequenceBuilder."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from frag_demo.sequences.builder import SequenceBuilder
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+TICKRATE = 64.0
+
+
+@pytest.fixture()
+def builder() -> SequenceBuilder:
+    return SequenceBuilder(
+        tickrate=TICKRATE,
+        start_seconds_before=3.0,
+        end_seconds_after=2.0,
+        framerate=60,
+        output_path="output",
+    )
+
+
+def _make_kill(tick: int, attacker: str = "zywoo", weapon: str = "awp") -> dict:
+    return {
+        "tick": tick,
+        "attacker_name": attacker,
+        "attacker_steamid": "76561198025798240",
+        "attacker_team_name": "CT",
+        "user_name": "victim",
+        "weapon": weapon,
+        "headshot": False,
+        "total_rounds_played": 1,
+        "is_warmup_period": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestSingleKillSequence:
+    def test_returns_one_sequence(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        assert len(seqs) == 1
+
+    def test_sequence_has_actions_key(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        assert "actions" in seqs[0]
+
+    def test_actions_is_nonempty_list(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        assert isinstance(seqs[0]["actions"], list)
+        assert len(seqs[0]["actions"]) > 0
+
+    def test_empty_dataframe_returns_no_sequences(self, builder: SequenceBuilder) -> None:
+        seqs = builder.build_sequences(pd.DataFrame(), "match.dem")
+        assert seqs == []
+
+
+class TestGroupedKills:
+    def test_kills_within_10_seconds_are_grouped(
+        self, builder: SequenceBuilder
+    ) -> None:
+        gap = int(TICKRATE * 5)  # 5 seconds — within threshold
+        df = pd.DataFrame(
+            [
+                _make_kill(tick=10000),
+                _make_kill(tick=10000 + gap),
+            ]
+        )
+        seqs = builder.build_sequences(df, "match.dem")
+        assert len(seqs) == 1
+
+    def test_kills_beyond_10_seconds_are_separate(
+        self, builder: SequenceBuilder
+    ) -> None:
+        gap = int(TICKRATE * 15)  # 15 seconds — beyond threshold
+        df = pd.DataFrame(
+            [
+                _make_kill(tick=10000),
+                _make_kill(tick=10000 + gap),
+            ]
+        )
+        seqs = builder.build_sequences(df, "match.dem")
+        assert len(seqs) == 2
+
+    def test_exactly_10_seconds_is_grouped(self, builder: SequenceBuilder) -> None:
+        gap = int(TICKRATE * 10)  # exactly at threshold
+        df = pd.DataFrame(
+            [
+                _make_kill(tick=10000),
+                _make_kill(tick=10000 + gap),
+            ]
+        )
+        seqs = builder.build_sequences(df, "match.dem")
+        assert len(seqs) == 1
+
+    def test_three_kills_two_groups(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame(
+            [
+                _make_kill(tick=5000),
+                _make_kill(tick=5320),   # +5 s → same group
+                _make_kill(tick=15000),  # +~150 s → new group
+            ]
+        )
+        seqs = builder.build_sequences(df, "match.dem")
+        assert len(seqs) == 2
+
+
+class TestSequenceStructure:
+    def test_required_cmds_present(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        cmds = {a["cmd"] for a in seqs[0]["actions"]}
+
+        assert "sv_cheats 1" in cmds
+        assert any("startmovie" in c for c in cmds)
+        assert any("endmovie" in c for c in cmds)
+        assert any("go_to_next_sequence" in c for c in cmds)
+
+    def test_actions_sorted_by_tick(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        ticks = [a["tick"] for a in seqs[0]["actions"]]
+        assert ticks == sorted(ticks)
+
+    def test_record_end_after_record_start(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        actions = seqs[0]["actions"]
+
+        start_tick = next(
+            a["tick"] for a in actions if "startmovie" in a["cmd"]
+        )
+        end_tick = next(
+            a["tick"] for a in actions if a["cmd"] == "endmovie"
+        )
+        assert end_tick > start_tick
+
+    def test_go_to_next_after_record_end(self, builder: SequenceBuilder) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        actions = seqs[0]["actions"]
+
+        end_tick = next(
+            a["tick"] for a in actions if a["cmd"] == "endmovie"
+        )
+        next_seq_tick = next(
+            a["tick"] for a in actions if a["cmd"] == "go_to_next_sequence"
+        )
+        assert next_seq_tick > end_tick
+
+    def test_start_tick_before_kill(self, builder: SequenceBuilder) -> None:
+        kill_tick = 10000
+        df = pd.DataFrame([_make_kill(tick=kill_tick)])
+        seqs = builder.build_sequences(df, "match.dem")
+        actions = seqs[0]["actions"]
+
+        start_tick = next(
+            a["tick"] for a in actions if "startmovie" in a["cmd"]
+        )
+        assert start_tick < kill_tick
+
+    def test_end_tick_after_kill(self, builder: SequenceBuilder) -> None:
+        kill_tick = 10000
+        df = pd.DataFrame([_make_kill(tick=kill_tick)])
+        seqs = builder.build_sequences(df, "match.dem")
+        actions = seqs[0]["actions"]
+
+        end_tick = next(
+            a["tick"] for a in actions if a["cmd"] == "endmovie"
+        )
+        assert end_tick > kill_tick
+
+
+class TestWriteJson:
+    def test_creates_file(self, builder: SequenceBuilder, tmp_path: Path) -> None:
+        demo = tmp_path / "match.dem"
+        demo.touch()
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, str(demo))
+        out = builder.write_json(seqs, str(demo))
+        assert out.exists()
+        assert out.suffix == ".json"
+
+    def test_json_is_valid_list(
+        self, builder: SequenceBuilder, tmp_path: Path
+    ) -> None:
+        demo = tmp_path / "match.dem"
+        demo.touch()
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, str(demo))
+        out = builder.write_json(seqs, str(demo))
+
+        loaded = json.loads(out.read_text(encoding="utf-8"))
+        assert isinstance(loaded, list)
+        assert len(loaded) == 1
+
+    def test_json_roundtrip(self, builder: SequenceBuilder, tmp_path: Path) -> None:
+        demo = tmp_path / "match.dem"
+        demo.touch()
+        df = pd.DataFrame(
+            [_make_kill(tick=10000), _make_kill(tick=25000, attacker="s1mple")]
+        )
+        seqs = builder.build_sequences(df, str(demo))
+        out = builder.write_json(seqs, str(demo))
+
+        loaded = json.loads(out.read_text(encoding="utf-8"))
+        assert len(loaded) == len(seqs)
+        for orig, restored in zip(seqs, loaded):
+            assert orig["actions"] == restored["actions"]
+
+    def test_output_path_next_to_demo(
+        self, builder: SequenceBuilder, tmp_path: Path
+    ) -> None:
+        demo = tmp_path / "mymatch.dem"
+        demo.touch()
+        df = pd.DataFrame([_make_kill(tick=1000)])
+        seqs = builder.build_sequences(df, str(demo))
+        out = builder.write_json(seqs, str(demo))
+        # The CS2 server plugin appends ".json" to the full demo filename
+        # (including ".dem"), so "mymatch.dem" -> "mymatch.dem.json".
+        assert out.name == "mymatch.dem.json"
+        assert out.parent == tmp_path
+
+
+class TestTicksFromSeconds:
+    def test_basic_conversion(self, builder: SequenceBuilder) -> None:
+        assert builder._ticks_from_seconds(1.0) == 64
+        assert builder._ticks_from_seconds(2.0) == 128
+        assert builder._ticks_from_seconds(0.5) == 32
+
+    def test_rounds_correctly(self, builder: SequenceBuilder) -> None:
+        b = SequenceBuilder(tickrate=64.0)
+        # 64 * 3.0 = 192
+        assert b._ticks_from_seconds(3.0) == 192
+
+    def test_128_tickrate(self) -> None:
+        b = SequenceBuilder(tickrate=128.0)
+        assert b._ticks_from_seconds(1.0) == 128
