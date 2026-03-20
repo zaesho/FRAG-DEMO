@@ -68,6 +68,7 @@ class SequenceBuilder:
     # How many ticks before start_tick to issue pause_playback so that the
     # demo loading screen has cleared before recording begins.
     _PAUSE_BEFORE_START: int = 4
+    _HUD_MODES: set[str] = {"deathnotices", "all", "none"}
 
     def __init__(
         self,
@@ -78,6 +79,7 @@ class SequenceBuilder:
         framerate: int = 60,
         output_path: str = "output",
         player_slots: dict[str, int] | None = None,
+        hud_mode: str = "deathnotices",
     ) -> None:
         self.tickrate = float(tickrate)
         if self.tickrate <= 0:
@@ -88,11 +90,17 @@ class SequenceBuilder:
             raise ValueError("end_seconds_after must be non-negative")
         if framerate <= 0:
             raise ValueError("framerate must be positive")
+        normalized_hud_mode = hud_mode.strip().lower()
+        if normalized_hud_mode not in self._HUD_MODES:
+            raise ValueError(
+                "hud_mode must be one of: " + ", ".join(sorted(self._HUD_MODES))
+            )
         self.recording_system = recording_system
         self.start_seconds_before = start_seconds_before
         self.end_seconds_after = end_seconds_after
         self.framerate = framerate
         self.output_path = output_path
+        self.hud_mode = normalized_hud_mode
         # Maps stable player identity -> entity slot number for spec_player commands.
         self.player_slots: dict[str, int] = player_slots or {}
 
@@ -209,13 +217,28 @@ class SequenceBuilder:
             if slot is None:
                 slot = self.player_slots.get(attacker_name)
 
-            spec_actions: list[dict[str, Any]] = [
-                {"tick": self._valid_tick(setup_tick), "cmd": "spec_mode 1"},
-            ]
-            if slot is not None:
+            spec_ticks = sorted(
+                {
+                    self._valid_tick(setup_tick),
+                    self._valid_tick(start_tick),
+                    *[
+                        self._valid_tick(int(row[tick_col]))
+                        for row in group
+                    ],
+                }
+            )
+            spec_actions: list[dict[str, Any]] = []
+            for spec_tick in spec_ticks:
                 spec_actions.append(
-                    {"tick": self._valid_tick(setup_tick), "cmd": f"spec_player {slot}"}
+                    {"tick": spec_tick, "cmd": "spec_autodirector 0"}
                 )
+                spec_actions.append(
+                    {"tick": spec_tick, "cmd": "spec_mode 1"}
+                )
+                if slot is not None:
+                    spec_actions.append(
+                        {"tick": spec_tick, "cmd": f"spec_player {slot}"}
+                    )
 
             # ----------------------------------------------------------
             # Build the actions list
@@ -251,12 +274,14 @@ class SequenceBuilder:
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_hud_telemetry_ping_show 0"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_hud_telemetry_serverrecvmargin_graph_show 0"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "r_show_build_info 0"},
-                {"tick": self._valid_tick(global_setup_tick), "cmd": "cl_draw_only_deathnotices 1"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_deathmsg lifetime 5"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_deathmsg filter clear"},
-                {"tick": self._valid_tick(global_setup_tick), "cmd": "demo_ui_mode 0"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "demo_timescale 1"},
                 {"tick": self._valid_tick(global_setup_tick), "cmd": "mirv_streams record screen enabled 1"},
+                *[
+                    {"tick": self._valid_tick(global_setup_tick), "cmd": cmd}
+                    for cmd in self._hud_commands()
+                ],
                 # ---- Jump to just before setup_tick ----
                 # CS2 sequence actions do not reliably execute before tick 64,
                 # so emit the first jump at the minimum valid action tick.
@@ -267,6 +292,10 @@ class SequenceBuilder:
                 # ---- Per-clip setup (setup_tick) ----
                 {"tick": self._valid_tick(setup_tick), "cmd": "mirv_deathmsg clear"},
                 {"tick": self._valid_tick(setup_tick), "cmd": "spec_show_xray 0"},
+                *[
+                    {"tick": self._valid_tick(setup_tick), "cmd": cmd}
+                    for cmd in self._hud_commands()
+                ],
                 # First-person POV locked to the killer.
                 *spec_actions,
                 *[
@@ -326,6 +355,14 @@ class SequenceBuilder:
     def _valid_tick(self, tick: int) -> int:
         """Clamp an action tick to the minimum value accepted by the plugin."""
         return max(self._MIN_VALID_TICK, int(tick))
+
+    def _hud_commands(self) -> list[str]:
+        """Return console commands for the configured HUD mode."""
+        if self.hud_mode == "all":
+            return ["cl_drawhud 1", "cl_draw_only_deathnotices 0", "demo_ui_mode 0"]
+        if self.hud_mode == "none":
+            return ["cl_drawhud 0", "cl_draw_only_deathnotices 0", "demo_ui_mode 0"]
+        return ["cl_drawhud 1", "cl_draw_only_deathnotices 1", "demo_ui_mode 0"]
 
     @staticmethod
     def _attacker_key(

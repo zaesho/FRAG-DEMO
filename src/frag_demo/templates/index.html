@@ -4,174 +4,224 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FRAG-DEMO</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=5">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=6">
 </head>
 <body>
-    <header>
-        <h1>FRAG-DEMO</h1>
-        <div style="display: flex; gap: 12px; align-items: center;">
-            <div id="cs2-badge" class="cs2-badge" style="display: none;"></div>
-            <div id="status-badge" class="status-badge">No demo loaded</div>
-        </div>
-    </header>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand-panel">
+                <h1>FRAG-DEMO</h1>
+                <p>Broadcast Replay Console</p>
+            </div>
 
-    <div class="container">
-        <!-- Demo File -->
-        <div class="section">
-            <div class="section-title">Demo File</div>
-            <div class="demo-loader">
-                <input type="text" id="demo-path" placeholder="Path to .dem file (e.g. C:/demos/match.dem)">
-                <button class="btn btn-secondary" id="btn-browse">Browse</button>
-                <button class="btn btn-primary" id="btn-load">Load Demo</button>
-                <div class="spinner" id="load-spinner"></div>
-            </div>
-            <div class="demo-info" id="demo-info" style="display: none;">
-                <div>Map: <span id="info-map">?</span></div>
-                <div>Tickrate: <span id="info-tickrate">?</span></div>
-                <div>Total kills: <span id="info-kills">0</span></div>
-            </div>
-        </div>
+            <section class="sidebar-card">
+                <div class="sidebar-section-title">Loaded Demos</div>
+                <div class="sidebar-list" id="recent-demo-list"></div>
+                <div class="sidebar-empty" id="recent-demo-empty">No recently loaded demos.</div>
+            </section>
 
-        <!-- Filters -->
-        <div class="section" id="filters-section" style="display: none;">
-            <div class="section-title">Filters</div>
-            <div class="filters">
-                <div class="filter-group">
-                    <label>Player</label>
-                    <select id="filter-player"><option value="">All</option></select>
+            <section class="sidebar-card">
+                <div class="sidebar-section-title">Watched Folders</div>
+                <div class="watch-controls">
+                    <input type="text" id="watch-folder-path" placeholder="Folder path for auto-discovery">
+                    <div class="watch-buttons">
+                        <button class="btn btn-secondary" id="btn-browse-folder">Browse</button>
+                        <button class="btn btn-primary" id="btn-add-watch">Add Folder</button>
+                        <button class="btn btn-secondary" id="btn-refresh-library">Refresh</button>
+                    </div>
                 </div>
-                <div class="filter-group">
-                    <label>Weapon</label>
-                    <select id="filter-weapon"><option value="">All</option></select>
-                </div>
-                <div class="filter-group">
-                    <label>Round</label>
-                    <select id="filter-round"><option value="">All</option></select>
-                </div>
-                <div class="filter-group">
-                    <label>Side</label>
-                    <select id="filter-side">
-                        <option value="">All</option>
-                        <option value="CT">CT</option>
-                        <option value="TERRORIST">T</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Headshot</label>
-                    <input type="checkbox" id="filter-headshot">
-                </div>
-                <button class="btn btn-secondary" id="btn-clear-filters">Clear</button>
-                <div class="filter-summary" id="filter-count">0 kills</div>
-            </div>
-        </div>
+                <div class="sidebar-list" id="watch-folder-list"></div>
+                <div class="sidebar-empty" id="watch-folder-empty">No folders configured.</div>
+            </section>
 
-        <!-- Kills Table -->
-        <div class="section" id="kills-section" style="display: none;">
-            <div class="section-title">Kills</div>
-            <div class="table-controls">
-                <button class="btn btn-secondary" id="btn-select-all">Select All</button>
-                <button class="btn btn-secondary" id="btn-select-none">Select None</button>
-            </div>
-            <div class="table-wrapper">
-                <table class="kill-table">
-                    <thead>
-                        <tr>
-                            <th class="col-check"></th>
-                            <th class="col-tick">Tick</th>
-                            <th>Round</th>
-                            <th>Attacker</th>
-                            <th>Victim</th>
-                            <th>Weapon</th>
-                            <th>HS</th>
-                        </tr>
-                    </thead>
-                    <tbody id="kills-tbody"></tbody>
-                </table>
-            </div>
-            <div class="empty-state" id="kills-empty" style="display: none;">
-                No kills match the current filters.
-            </div>
-        </div>
+            <section class="sidebar-card sidebar-card-grow">
+                <div class="sidebar-section-title">Discovered Demos</div>
+                <div class="sidebar-list" id="discovered-demo-list"></div>
+                <div class="sidebar-empty" id="discovered-demo-empty">No demos found in watched folders.</div>
+            </section>
 
-        <!-- Queue -->
-        <div class="section" id="queue-section" style="display: none;">
-            <div class="section-title">Recording Queue</div>
-            <div class="table-controls">
-                <span id="queue-count" class="filter-summary">0 kills queued</span>
-                <button class="btn btn-secondary" id="btn-clear-queue" style="margin-left: auto;">Clear Queue</button>
+            <div class="sidebar-footer">
+                <div class="sidebar-section-title">Selected Demo</div>
+                <div class="selected-path" id="selected-demo-path">No demo selected</div>
+                <button class="btn btn-primary btn-load-selected" id="btn-load-selected" disabled>Load Selected Demo</button>
             </div>
-            <div class="table-wrapper" style="max-height: 240px;">
-                <table class="kill-table">
-                    <thead>
-                        <tr>
-                            <th style="width: 30px;"></th>
-                            <th class="col-tick">Tick</th>
-                            <th>Round</th>
-                            <th>Attacker</th>
-                            <th>Victim</th>
-                            <th>Weapon</th>
-                            <th>HS</th>
-                        </tr>
-                    </thead>
-                    <tbody id="queue-tbody"></tbody>
-                </table>
-            </div>
-            <div class="empty-state" id="queue-empty">
-                Select kills above with the checkboxes to queue them.
-            </div>
-        </div>
+        </aside>
 
-        <!-- Record Settings -->
-        <div class="section" id="record-section" style="display: none;">
-            <div class="section-title">Record</div>
-            <div class="record-bar">
-                <div class="filter-group">
-                    <label>Before (s)</label>
-                    <input type="number" id="rec-before" value="3.0" min="0" max="30" step="0.5">
+        <main class="dashboard">
+            <header class="topbar">
+                <div>
+                    <h2>Operator Dashboard</h2>
+                    <p id="library-scan-status">Library ready.</p>
                 </div>
-                <div class="filter-group">
-                    <label>After (s)</label>
-                    <input type="number" id="rec-after" value="2.0" min="0" max="30" step="0.5">
+                <div class="topbar-badges">
+                    <div id="cs2-badge" class="cs2-badge" style="display: none;"></div>
+                    <div id="status-badge" class="status-badge">No demo loaded</div>
                 </div>
-                <div class="filter-group">
-                    <label>FPS</label>
-                    <input type="number" id="rec-framerate" value="60" min="24" max="300" step="1">
-                </div>
-                <div class="record-actions">
-                    <span class="selected-count" id="selected-count">0 queued</span>
-                    <button class="btn btn-secondary" id="btn-generate" disabled>Generate JSON Only</button>
-                    <button class="btn btn-record" id="btn-record" disabled>Record</button>
-                    <button class="btn btn-primary" id="btn-encode">Encode Clips</button>
-                </div>
-            </div>
-        </div>
+            </header>
 
-        <!-- Clip Preview -->
-        <div class="section" id="preview-section" style="display: none;">
-            <div class="section-title" style="display: flex; justify-content: space-between; align-items: center;">
-                Clip Preview
-                <button class="btn btn-secondary" id="btn-clean" style="font-size: 0.7rem; padding: 4px 10px;">Clean All Clips</button>
-            </div>
-            <div class="clip-list" id="clip-list"></div>
-            <div class="video-player-wrap">
-                <video id="video-player" controls preload="metadata">
-                    Your browser does not support the video tag.
-                </video>
-            </div>
-            <div class="empty-state" id="preview-empty">
-                No encoded clips yet. Record and encode clips first.
-            </div>
-        </div>
+            <div class="dashboard-content">
+                <div class="section">
+                    <div class="section-title">Demo Loader</div>
+                    <div class="demo-loader">
+                        <input type="text" id="demo-path" placeholder="Path to .dem file (e.g. C:/demos/match.dem)">
+                        <button class="btn btn-secondary" id="btn-browse">Browse Demo</button>
+                        <button class="btn btn-primary" id="btn-load">Load Demo</button>
+                        <div class="spinner" id="load-spinner"></div>
+                    </div>
+                    <div class="demo-info" id="demo-info" style="display: none;">
+                        <div>Map: <span id="info-map">?</span></div>
+                        <div>Tickrate: <span id="info-tickrate">?</span></div>
+                        <div>Total kills: <span id="info-kills">0</span></div>
+                    </div>
+                </div>
 
-        <!-- Output Log -->
-        <div class="section">
-            <div class="section-title">Output</div>
-            <div class="output-log" id="output-log">
-                <div class="log-line">Ready.</div>
+                <div class="section" id="filters-section" style="display: none;">
+                    <div class="section-title">Filters</div>
+                    <div class="filters">
+                        <div class="filter-group">
+                            <label>Player</label>
+                            <select id="filter-player"><option value="">All</option></select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Weapon</label>
+                            <select id="filter-weapon"><option value="">All</option></select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Round</label>
+                            <select id="filter-round"><option value="">All</option></select>
+                        </div>
+                        <div class="filter-group">
+                            <label>Side</label>
+                            <select id="filter-side">
+                                <option value="">All</option>
+                                <option value="CT">CT</option>
+                                <option value="TERRORIST">T</option>
+                            </select>
+                        </div>
+                        <div class="filter-group filter-group-checkbox">
+                            <label>Headshot</label>
+                            <input type="checkbox" id="filter-headshot">
+                        </div>
+                        <button class="btn btn-secondary" id="btn-clear-filters">Clear</button>
+                        <div class="filter-summary" id="filter-count">0 kills</div>
+                    </div>
+                </div>
+
+                <div class="section" id="kills-section" style="display: none;">
+                    <div class="section-title">Kills</div>
+                    <div class="table-controls">
+                        <button class="btn btn-secondary" id="btn-select-all">Select All</button>
+                        <button class="btn btn-secondary" id="btn-select-none">Select None</button>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="kill-table">
+                            <thead>
+                                <tr>
+                                    <th class="col-check"></th>
+                                    <th class="col-tick">Tick</th>
+                                    <th>Round</th>
+                                    <th>Attacker</th>
+                                    <th>Victim</th>
+                                    <th>Weapon</th>
+                                    <th>HS</th>
+                                </tr>
+                            </thead>
+                            <tbody id="kills-tbody"></tbody>
+                        </table>
+                    </div>
+                    <div class="empty-state" id="kills-empty" style="display: none;">
+                        No kills match the current filters.
+                    </div>
+                </div>
+
+                <div class="section" id="queue-section" style="display: none;">
+                    <div class="section-title">Recording Queue</div>
+                    <div class="table-controls">
+                        <span id="queue-count" class="filter-summary">0 kills queued</span>
+                        <button class="btn btn-secondary" id="btn-clear-queue" style="margin-left: auto;">Clear Queue</button>
+                    </div>
+                    <div class="table-wrapper queue-table-wrap">
+                        <table class="kill-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 30px;"></th>
+                                    <th class="col-tick">Tick</th>
+                                    <th>Round</th>
+                                    <th>Attacker</th>
+                                    <th>Victim</th>
+                                    <th>Weapon</th>
+                                    <th>HS</th>
+                                </tr>
+                            </thead>
+                            <tbody id="queue-tbody"></tbody>
+                        </table>
+                    </div>
+                    <div class="empty-state" id="queue-empty">
+                        Select kills above with the checkboxes to queue them.
+                    </div>
+                </div>
+
+                <div class="section" id="record-section" style="display: none;">
+                    <div class="section-title">Record</div>
+                    <div class="record-bar">
+                        <div class="filter-group">
+                            <label>Before (s)</label>
+                            <input type="number" id="rec-before" value="3.0" min="0" max="30" step="0.5">
+                        </div>
+                        <div class="filter-group">
+                            <label>After (s)</label>
+                            <input type="number" id="rec-after" value="2.0" min="0" max="30" step="0.5">
+                        </div>
+                        <div class="filter-group">
+                            <label>FPS</label>
+                            <input type="number" id="rec-framerate" value="60" min="24" max="300" step="1">
+                        </div>
+                        <div class="filter-group">
+                            <label>HUD</label>
+                            <select id="rec-hud-mode">
+                                <option value="deathnotices">Death Notices Only</option>
+                                <option value="all">All HUD</option>
+                                <option value="none">No HUD</option>
+                            </select>
+                        </div>
+                        <div class="record-actions">
+                            <span class="selected-count" id="selected-count">0 queued</span>
+                            <button class="btn btn-secondary" id="btn-generate" disabled>Generate JSON Only</button>
+                            <button class="btn btn-record" id="btn-record" disabled>Record</button>
+                            <button class="btn btn-primary" id="btn-encode">Encode Clips</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section" id="preview-section" style="display: none;">
+                    <div class="section-title section-title-row">
+                        Clip Preview
+                        <button class="btn btn-secondary" id="btn-clean">Clean All Clips</button>
+                    </div>
+                    <div class="clip-list" id="clip-list"></div>
+                    <div class="video-player-wrap">
+                        <video id="video-player" controls preload="metadata">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <div class="empty-state" id="preview-empty">
+                        No encoded clips yet. Record and encode clips first.
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-title">Output</div>
+                    <div class="output-log" id="output-log">
+                        <div class="log-line">Ready.</div>
+                    </div>
+                </div>
             </div>
-        </div>
+        </main>
     </div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=5"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=6"></script>
 </body>
 </html>

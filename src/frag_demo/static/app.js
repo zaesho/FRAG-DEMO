@@ -4,6 +4,13 @@
 let currentKills = [];          // Last fetched kill list (from filters)
 let queue = new Map();          // kill_id -> kill object (the recording queue)
 let cs2Running = false;
+let selectedDemoPath = null;
+let watchedFolders = [];
+let recentDemos = [];
+let discoveredDemos = [];
+
+const STATUS_POLL_MS = 5000;
+const LIBRARY_POLL_MS = 10000;
 
 // -- DOM refs --
 const $ = (sel) => document.querySelector(sel);
@@ -27,6 +34,7 @@ async function apiGet(url) {
 // -- Logging --
 function logOutput(msg, cls = "") {
     const log = $("#output-log");
+    if (!log) return;
     const line = document.createElement("div");
     line.className = "log-line" + (cls ? " " + cls : "");
     line.textContent = "> " + msg;
@@ -43,10 +51,252 @@ function escapeHtml(value) {
         .replaceAll("'", "&#39;");
 }
 
+function pathKey(path) {
+    return String(path || "").replaceAll("\\", "/").toLowerCase();
+}
+
+function formatTimestamp(timestamp) {
+    if (!timestamp) return "Unknown";
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return String(timestamp);
+    return date.toLocaleString();
+}
+
+function formatMtime(seconds) {
+    if (typeof seconds !== "number") return "mtime unknown";
+    const date = new Date(seconds * 1000);
+    if (Number.isNaN(date.getTime())) return "mtime unknown";
+    return date.toLocaleString();
+}
+
+function shortPath(path) {
+    const raw = String(path || "");
+    if (!raw) return "";
+    const parts = raw.replaceAll("\\", "/").split("/").filter(Boolean);
+    if (parts.length <= 2) return raw;
+    return ".../" + parts.slice(-2).join("/");
+}
+
+function updateSelectedDemoUI() {
+    const selectedLabel = $("#selected-demo-path");
+    const loadBtn = $("#btn-load-selected");
+    if (selectedLabel) {
+        selectedLabel.textContent = selectedDemoPath || "No demo selected";
+    }
+    if (loadBtn) {
+        loadBtn.disabled = !selectedDemoPath;
+    }
+}
+
+async function selectDemo(path, persist = true) {
+    selectedDemoPath = path || null;
+    if (selectedDemoPath) {
+        $("#demo-path").value = selectedDemoPath;
+    }
+
+    renderLibraryLists();
+    updateSelectedDemoUI();
+
+    if (!persist || !selectedDemoPath) return;
+
+    try {
+        const data = await apiPost("/api/library/select", { demo_path: selectedDemoPath });
+        if (!data.ok) {
+            logOutput("Select demo error: " + (data.error || "unknown"), "log-error");
+            return;
+        }
+        if (data.selected_demo_path) {
+            selectedDemoPath = data.selected_demo_path;
+            $("#demo-path").value = selectedDemoPath;
+            renderLibraryLists();
+            updateSelectedDemoUI();
+        }
+    } catch (e) {
+        logOutput("Select demo error: " + e.message, "log-error");
+    }
+}
+
+function applyLibraryPayload(data) {
+    watchedFolders = Array.isArray(data.watched_folders) ? data.watched_folders : [];
+    recentDemos = Array.isArray(data.recent_demos) ? data.recent_demos : [];
+    discoveredDemos = Array.isArray(data.discovered_demos) ? data.discovered_demos : [];
+
+    if (typeof data.selected_demo_path === "string" && data.selected_demo_path.trim()) {
+        selectedDemoPath = data.selected_demo_path;
+        $("#demo-path").value = data.selected_demo_path;
+    }
+
+    const scanStatus = $("#library-scan-status");
+    if (scanStatus) {
+        const scannedAt = formatTimestamp(data.scanned_at);
+        scanStatus.textContent = `${discoveredDemos.length} discovered demos | last scan ${scannedAt}`;
+    }
+
+    renderLibraryLists();
+    updateSelectedDemoUI();
+}
+
+function renderDemoList(containerSel, emptySel, demos, getMeta) {
+    const container = $(containerSel);
+    const empty = $(emptySel);
+    if (!container || !empty) return;
+
+    if (!demos.length) {
+        container.innerHTML = "";
+        empty.style.display = "block";
+        return;
+    }
+
+    empty.style.display = "none";
+    container.innerHTML = demos
+        .map((demo) => {
+            const isSelected = pathKey(demo.path) === pathKey(selectedDemoPath);
+            const warning = demo.exists === false
+                ? '<div class="sidebar-item-flag">MISSING FILE</div>'
+                : "";
+            return `<button class="sidebar-item ${isSelected ? "is-selected" : ""}" data-demo-path="${escapeHtml(demo.path || "")}">
+                <div class="sidebar-item-title">${escapeHtml(demo.name || "Unknown demo")}</div>
+                <div class="sidebar-item-meta">${escapeHtml(getMeta(demo))}</div>
+                ${warning}
+            </button>`;
+        })
+        .join("");
+
+    container.querySelectorAll(".sidebar-item[data-demo-path]").forEach((el) => {
+        el.addEventListener("click", () => {
+            void selectDemo(el.dataset.demoPath || "", true);
+        });
+    });
+}
+
+function renderWatchedFolders() {
+    const list = $("#watch-folder-list");
+    const empty = $("#watch-folder-empty");
+    if (!list || !empty) return;
+
+    if (!watchedFolders.length) {
+        list.innerHTML = "";
+        empty.style.display = "block";
+        return;
+    }
+
+    empty.style.display = "none";
+    list.innerHTML = watchedFolders
+        .map((folder) => {
+            const missing = folder.exists === false
+                ? '<div class="sidebar-item-flag">FOLDER MISSING</div>'
+                : "";
+            return `<div class="folder-row">
+                <div class="sidebar-item">
+                    <div class="sidebar-item-title">${escapeHtml(shortPath(folder.path || ""))}</div>
+                    <div class="sidebar-item-meta">${escapeHtml(folder.path || "")}</div>
+                    ${missing}
+                </div>
+                <button class="btn-icon" type="button" title="Remove folder" data-remove-folder="${escapeHtml(folder.path || "")}">x</button>
+            </div>`;
+        })
+        .join("");
+
+    list.querySelectorAll("[data-remove-folder]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            void removeWatchFolder(btn.dataset.removeFolder || "");
+        });
+    });
+}
+
+function renderLibraryLists() {
+    renderDemoList(
+        "#recent-demo-list",
+        "#recent-demo-empty",
+        recentDemos,
+        (demo) => `${shortPath(demo.folder_path || "") || "Unknown folder"} | loaded ${formatTimestamp(demo.last_loaded_at)}`,
+    );
+
+    renderDemoList(
+        "#discovered-demo-list",
+        "#discovered-demo-empty",
+        discoveredDemos,
+        (demo) => `${shortPath(demo.folder_path || "") || "Unknown folder"} | ${formatMtime(demo.modified_ts)}`,
+    );
+
+    renderWatchedFolders();
+}
+
+async function loadLibrary({ silent = false } = {}) {
+    try {
+        const data = await apiGet("/api/library");
+        if (!data.ok) {
+            if (!silent) logOutput("Library error: " + (data.error || "unknown"), "log-error");
+            return;
+        }
+        applyLibraryPayload(data);
+    } catch (e) {
+        if (!silent) logOutput("Library error: " + e.message, "log-error");
+    }
+}
+
+async function browseWatchFolder() {
+    try {
+        const data = await apiGet("/api/browse-folder");
+        if (data.ok && data.path) {
+            $("#watch-folder-path").value = data.path;
+        }
+    } catch (e) {
+        logOutput("Browse folder failed: " + e.message, "log-error");
+    }
+}
+
+async function addWatchFolder() {
+    const folderPath = $("#watch-folder-path").value.trim();
+    if (!folderPath) {
+        logOutput("Enter a folder path to watch.", "log-error");
+        return;
+    }
+
+    try {
+        const data = await apiPost("/api/library/watch/add", { folder_path: folderPath });
+        if (!data.ok) {
+            logOutput("Add watch folder error: " + data.error, "log-error");
+            return;
+        }
+        $("#watch-folder-path").value = "";
+        applyLibraryPayload(data);
+        logOutput("Added watch folder.", "log-success");
+    } catch (e) {
+        logOutput("Add watch folder error: " + e.message, "log-error");
+    }
+}
+
+async function removeWatchFolder(folderPath) {
+    if (!folderPath) return;
+    try {
+        const data = await apiPost("/api/library/watch/remove", { folder_path: folderPath });
+        if (!data.ok) {
+            logOutput("Remove watch folder error: " + data.error, "log-error");
+            return;
+        }
+        applyLibraryPayload(data);
+        logOutput("Removed watch folder.");
+    } catch (e) {
+        logOutput("Remove watch folder error: " + e.message, "log-error");
+    }
+}
+
+async function loadSelectedDemo() {
+    if (!selectedDemoPath) {
+        logOutput("Select a demo in the sidebar first.", "log-error");
+        return;
+    }
+    $("#demo-path").value = selectedDemoPath;
+    await loadDemo();
+}
+
 // -- Spinner --
 function setLoading(loading) {
     const spinner = $("#load-spinner");
     const btn = $("#btn-load");
+    if (!spinner || !btn) return;
+
     if (loading) {
         spinner.classList.add("active");
         btn.disabled = true;
@@ -60,6 +310,8 @@ function setLoading(loading) {
 function updateCS2State(running) {
     cs2Running = running;
     const badge = $("#cs2-badge");
+    if (!badge) return;
+
     if (running) {
         badge.textContent = "CS2 RUNNING";
         badge.classList.add("running");
@@ -80,18 +332,26 @@ async function pollStatus() {
             clearLoadedState();
         }
         updateCS2State(data.cs2_running || false);
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+        // ignore poll errors
+    }
 }
 
 function clearLoadedState() {
     currentKills = [];
     queue.clear();
     updateStatus(false);
-    $("#demo-info").style.display = "none";
-    $("#preview-section").style.display = "none";
+
+    const demoInfo = $("#demo-info");
+    if (demoInfo) demoInfo.style.display = "none";
+
+    const previewSection = $("#preview-section");
+    if (previewSection) previewSection.style.display = "none";
+
     $$("#filters-section, #kills-section, #queue-section, #record-section").forEach(
-        (el) => (el.style.display = "none")
+        (el) => (el.style.display = "none"),
     );
+
     renderTable([]);
     renderQueue();
     updateRecordButton();
@@ -142,18 +402,19 @@ async function loadDemo() {
         updateStatus(true, header.map_name || "?");
 
         $$("#filters-section, #kills-section, #queue-section, #record-section").forEach(
-            (el) => (el.style.display = "block")
+            (el) => (el.style.display = "block"),
         );
 
         logOutput(
             `Loaded: ${header.map_name || "?"} | ${data.total_kills} kills | tickrate ${header.tickrate || "?"}`,
-            "log-success"
+            "log-success",
         );
 
         queue.clear();
         renderQueue();
         await fetchKills();
         await loadClips();
+        await loadLibrary({ silent: true });
     } catch (e) {
         clearLoadedState();
         logOutput("Error: " + e.message, "log-error");
@@ -164,6 +425,8 @@ async function loadDemo() {
 
 function populateSelect(selector, values) {
     const sel = $(selector);
+    if (!sel) return;
+
     const current = sel.value;
     sel.innerHTML = '<option value="">All</option>';
     for (const v of values) {
@@ -177,6 +440,8 @@ function populateSelect(selector, values) {
 
 function updateStatus(loaded, map) {
     const badge = $("#status-badge");
+    if (!badge) return;
+
     if (loaded) {
         badge.textContent = map;
         badge.classList.add("loaded");
@@ -192,12 +457,16 @@ async function fetchKills() {
     const weapon = $("#filter-weapon").value || null;
     const headshot = $("#filter-headshot").checked ? true : null;
     const roundVal = $("#filter-round").value;
-    const round_num = roundVal ? parseInt(roundVal) : null;
+    const round_num = roundVal ? parseInt(roundVal, 10) : null;
     const side = $("#filter-side").value || null;
 
     try {
         const data = await apiPost("/api/kills", {
-            player, weapon, headshot, round_num, side,
+            player,
+            weapon,
+            headshot,
+            round_num,
+            side,
         });
 
         if (!data.ok) {
@@ -218,13 +487,15 @@ function clearFilters() {
     $("#filter-headshot").checked = false;
     $("#filter-round").value = "";
     $("#filter-side").value = "";
-    fetchKills();
+    void fetchKills();
 }
 
 // -- Table rendering --
 function renderTable(kills) {
     const tbody = $("#kills-tbody");
     const empty = $("#kills-empty");
+
+    if (!tbody || !empty) return;
 
     if (kills.length === 0) {
         tbody.innerHTML = "";
@@ -266,7 +537,7 @@ function toggleKill(killId) {
         const kill = currentKills.find((k) => k.kill_id === killId);
         if (kill) queue.set(killId, kill);
     }
-    // Update just the row highlight (no full re-render)
+
     const row = $(`tr[data-kill-id="${killId}"]`);
     if (row) {
         row.classList.toggle("selected", queue.has(killId));
@@ -285,7 +556,6 @@ function selectAll() {
 }
 
 function selectNone() {
-    // Only deselect kills currently visible in the table
     for (const k of currentKills) {
         if (Number.isInteger(k.kill_id)) queue.delete(k.kill_id);
     }
@@ -314,8 +584,9 @@ function renderQueue() {
     const tbody = $("#queue-tbody");
     const empty = $("#queue-empty");
     const count = $("#queue-count");
-    const size = queue.size;
+    if (!tbody || !empty || !count) return;
 
+    const size = queue.size;
     count.textContent = size + " kill" + (size !== 1 ? "s" : "") + " queued";
 
     if (size === 0) {
@@ -348,9 +619,12 @@ function renderQueue() {
 
 function updateRecordButton() {
     const count = queue.size;
-    $("#selected-count").textContent = count + " queued";
+    const selectedCount = $("#selected-count");
+    if (selectedCount) selectedCount.textContent = count + " queued";
+
     const btn = $("#btn-record");
     const genBtn = $("#btn-generate");
+    if (!btn || !genBtn) return;
 
     genBtn.disabled = count === 0;
 
@@ -368,6 +642,8 @@ function updateRecordButton() {
 
 function updateEncodeButton() {
     const btn = $("#btn-encode");
+    if (!btn) return;
+
     if (cs2Running) {
         btn.textContent = "Wait For CS2";
         btn.disabled = true;
@@ -387,6 +663,7 @@ async function startRecord(launch) {
     const beforeValue = parseFloat($("#rec-before").value);
     const afterValue = parseFloat($("#rec-after").value);
     const framerateValue = parseInt($("#rec-framerate").value, 10);
+    const hudMode = $("#rec-hud-mode").value || "deathnotices";
     const before = Number.isNaN(beforeValue) ? 3.0 : beforeValue;
     const after = Number.isNaN(afterValue) ? 2.0 : afterValue;
     const framerate = Number.isNaN(framerateValue) ? 60 : framerateValue;
@@ -399,7 +676,10 @@ async function startRecord(launch) {
     try {
         const data = await apiPost("/api/record", {
             selected_ids: selectedIds,
-            before, after, framerate,
+            before,
+            after,
+            framerate,
+            hud_mode: hudMode,
             launch,
         });
 
@@ -417,12 +697,11 @@ async function startRecord(launch) {
         } else {
             logOutput(
                 `Generated ${data.sequences_count} sequence(s) -> ${data.json_path}`,
-                "log-success"
+                "log-success",
             );
             if (data.launched) {
                 logOutput("CS2 launched via HLAE. Old clips were cleaned.", "log-success");
                 updateCS2State(true);
-                // Hide stale preview
                 $("#preview-section").style.display = "none";
             }
         }
@@ -464,7 +743,6 @@ async function loadClips() {
             });
         });
 
-        // Auto-play the combined clip if available, otherwise the first one
         const combined = data.clips.find((c) => c.is_combined);
         const first = combined || data.clips[0];
         if (first) playClip(first.name);
@@ -478,10 +756,9 @@ function playClip(filename) {
     player.src = "/clips/" + encodeURIComponent(filename);
     player.load();
 
-    // Highlight active button
     $$(".clip-btn").forEach((btn) => btn.classList.remove("active"));
     const activeBtn = Array.from($$(".clip-btn")).find(
-        (btn) => decodeURIComponent(btn.dataset.filename || "") === filename
+        (btn) => decodeURIComponent(btn.dataset.filename || "") === filename,
     );
     if (activeBtn) activeBtn.classList.add("active");
 }
@@ -550,12 +827,16 @@ async function encodeClips() {
 // -- Init --
 document.addEventListener("DOMContentLoaded", () => {
     $$("#filter-player, #filter-weapon, #filter-round, #filter-side").forEach(
-        (el) => el.addEventListener("change", fetchKills)
+        (el) => el.addEventListener("change", fetchKills),
     );
     $("#filter-headshot").addEventListener("change", fetchKills);
 
     $("#btn-browse").addEventListener("click", browseDemoFile);
     $("#btn-load").addEventListener("click", loadDemo);
+    $("#btn-load-selected").addEventListener("click", () => {
+        void loadSelectedDemo();
+    });
+
     $("#btn-clear-filters").addEventListener("click", clearFilters);
     $("#btn-select-all").addEventListener("click", selectAll);
     $("#btn-select-none").addEventListener("click", selectNone);
@@ -565,11 +846,34 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#btn-encode").addEventListener("click", encodeClips);
     $("#btn-clean").addEventListener("click", cleanClips);
 
-    $("#demo-path").addEventListener("keydown", (e) => {
-        if (e.key === "Enter") loadDemo();
+    $("#btn-browse-folder").addEventListener("click", () => {
+        void browseWatchFolder();
+    });
+    $("#btn-add-watch").addEventListener("click", () => {
+        void addWatchFolder();
+    });
+    $("#btn-refresh-library").addEventListener("click", () => {
+        void loadLibrary();
     });
 
-    pollStatus();
-    setInterval(pollStatus, 5000);
+    $("#demo-path").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") void loadDemo();
+    });
+
+    $("#watch-folder-path").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") void addWatchFolder();
+    });
+
+    void pollStatus();
+    void loadLibrary({ silent: true });
+    setInterval(pollStatus, STATUS_POLL_MS);
+    setInterval(() => {
+        void loadLibrary({ silent: true });
+    }, LIBRARY_POLL_MS);
     updateEncodeButton();
+    updateSelectedDemoUI();
+
+    // Keep global access for inline event handlers in table markup.
+    window.toggleKill = toggleKill;
+    window.removeFromQueue = removeFromQueue;
 });

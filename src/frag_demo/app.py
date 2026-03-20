@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,11 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # Disable static file caching
 _CS2_TICKRATE = 64  # CS2 always uses 64 tick (sub-tick system)
 _KILL_ID_COL = "kill_id"
 _RECORD_NAME_RE = re.compile(r'^mirv_streams record name "(.+)"$')
+_HUD_MODES = {"deathnotices", "all", "none"}
+_UI_STATE_DIR = Path.home() / ".frag-demo"
+_UI_STATE_PATH = _UI_STATE_DIR / "ui_state.json"
+_MAX_RECENT_DEMOS = 50
+_MAX_DISCOVERED_DEMOS = 1000
 
 # ---------------------------------------------------------------------------
 # Server-side state (single-user desktop tool)
@@ -50,6 +56,7 @@ _state: dict[str, Any] = {
 # Launch guard — prevent concurrent CS2 launches
 _launch_lock = threading.Lock()
 _cs2_running = False
+_ui_state_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +150,242 @@ def _parse_int_field(
     if minimum is not None and value < minimum:
         raise ValueError(f"{key} must be at least {minimum}")
     return value
+
+
+def _parse_str_choice_field(
+    data: dict[str, Any],
+    key: str,
+    default: str,
+    *,
+    allowed: set[str],
+) -> str:
+    """Parse a string choice request field against an allowed set."""
+    raw_value = data.get(key, default)
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{key} must be a string")
+    value = raw_value.strip().lower()
+    if value not in allowed:
+        raise ValueError(f"{key} must be one of: {', '.join(sorted(allowed))}")
+    return value
+
+
+def _utc_iso_now() -> str:
+    """Return an RFC3339 UTC timestamp without fractional seconds."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _path_key(path: str) -> str:
+    """Normalize a path for case-insensitive dedupe."""
+    return path.replace("\\", "/").casefold()
+
+
+def _normalize_path(path: str, *, strict: bool) -> str:
+    """Resolve a path to an absolute normalized string."""
+    return str(Path(path).expanduser().resolve(strict=strict))
+
+
+def _is_demo_path(path: str) -> bool:
+    """Return True when a path looks like a .dem file."""
+    return path.lower().endswith(".dem")
+
+
+def _default_ui_state() -> dict[str, Any]:
+    """Return default persisted UI state."""
+    return {
+        "watched_folders": [],
+        "recent_demos": [],
+        "selected_demo_path": None,
+    }
+
+
+def _coerce_ui_state(raw: Any) -> dict[str, Any]:
+    """Validate and normalize persisted UI state payload."""
+    state = _default_ui_state()
+    if not isinstance(raw, dict):
+        return state
+
+    watched: list[dict[str, Any]] = []
+    watched_seen: set[str] = set()
+    for entry in raw.get("watched_folders", []):
+        if not isinstance(entry, dict):
+            continue
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        try:
+            normalized = _normalize_path(raw_path.strip(), strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        key = _path_key(normalized)
+        if key in watched_seen:
+            continue
+        watched_seen.add(key)
+        watched.append({"path": normalized, "recursive": True})
+    state["watched_folders"] = watched
+
+    recent: list[dict[str, Any]] = []
+    recent_seen: set[str] = set()
+    for entry in raw.get("recent_demos", []):
+        if not isinstance(entry, dict):
+            continue
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        try:
+            normalized = _normalize_path(raw_path.strip(), strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        key = _path_key(normalized)
+        if key in recent_seen:
+            continue
+        recent_seen.add(key)
+        timestamp = entry.get("last_loaded_at")
+        last_loaded_at = timestamp if isinstance(timestamp, str) else ""
+        recent.append({"path": normalized, "last_loaded_at": last_loaded_at})
+        if len(recent) >= _MAX_RECENT_DEMOS:
+            break
+    state["recent_demos"] = recent
+
+    selected = raw.get("selected_demo_path")
+    if isinstance(selected, str) and selected.strip() and _is_demo_path(selected.strip()):
+        try:
+            state["selected_demo_path"] = _normalize_path(selected.strip(), strict=False)
+        except (OSError, RuntimeError, ValueError):
+            state["selected_demo_path"] = None
+
+    return state
+
+
+def _load_ui_state_unlocked() -> dict[str, Any]:
+    """Read persisted UI state from disk."""
+    if not _UI_STATE_PATH.exists():
+        return _default_ui_state()
+
+    try:
+        loaded = json.loads(_UI_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _default_ui_state()
+
+    return _coerce_ui_state(loaded)
+
+
+def _save_ui_state_unlocked(state: dict[str, Any]) -> None:
+    """Persist UI state to disk."""
+    _UI_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _UI_STATE_PATH.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _upsert_recent_demo(ui_state: dict[str, Any], demo_path: str) -> None:
+    """Move demo to the front of recents and trim max length."""
+    demo_key = _path_key(demo_path)
+    recents = [
+        item
+        for item in ui_state["recent_demos"]
+        if _path_key(str(item.get("path", ""))) != demo_key
+    ]
+    recents.insert(0, {"path": demo_path, "last_loaded_at": _utc_iso_now()})
+    ui_state["recent_demos"] = recents[:_MAX_RECENT_DEMOS]
+
+
+def _scan_watched_demos(
+    watched_folders: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Scan watched folders for .dem files and return folder/demo payloads."""
+    folders_payload: list[dict[str, Any]] = []
+    discovered_by_key: dict[str, dict[str, Any]] = {}
+
+    for folder in watched_folders:
+        folder_path = str(folder.get("path", ""))
+        recursive = bool(folder.get("recursive", True))
+        folder_obj = Path(folder_path)
+        exists = folder_obj.exists() and folder_obj.is_dir()
+        folders_payload.append(
+            {
+                "path": folder_path,
+                "recursive": recursive,
+                "exists": exists,
+            }
+        )
+
+        if not exists:
+            continue
+
+        walker = folder_obj.rglob("*") if recursive else folder_obj.glob("*")
+        try:
+            for candidate in walker:
+                try:
+                    if not candidate.is_file() or candidate.suffix.lower() != ".dem":
+                        continue
+                    normalized = str(candidate.resolve(strict=False))
+                    stat = candidate.stat()
+                except (OSError, RuntimeError, ValueError):
+                    continue
+
+                key = _path_key(normalized)
+                payload = {
+                    "name": candidate.name,
+                    "path": normalized,
+                    "folder_path": str(candidate.parent),
+                    "modified_ts": float(stat.st_mtime),
+                    "size_mb": round(stat.st_size / (1024 * 1024), 1),
+                    "exists": True,
+                }
+                existing = discovered_by_key.get(key)
+                if existing is None or payload["modified_ts"] > existing["modified_ts"]:
+                    discovered_by_key[key] = payload
+        except OSError:
+            continue
+
+    discovered = sorted(
+        discovered_by_key.values(),
+        key=lambda item: item["modified_ts"],
+        reverse=True,
+    )[:_MAX_DISCOVERED_DEMOS]
+    return folders_payload, discovered
+
+
+def _recent_demos_payload(recent_demos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach display metadata to recent demo items."""
+    payload: list[dict[str, Any]] = []
+    for entry in recent_demos:
+        path = str(entry.get("path", ""))
+        if not path:
+            continue
+        item_path = Path(path)
+        payload.append(
+            {
+                "name": item_path.name,
+                "path": path,
+                "folder_path": str(item_path.parent),
+                "last_loaded_at": str(entry.get("last_loaded_at", "")),
+                "exists": item_path.exists() and item_path.is_file(),
+            }
+        )
+    return payload
+
+
+def _build_library_payload() -> dict[str, Any]:
+    """Build current library payload including scanned demos."""
+    with _ui_state_lock:
+        ui_state = _load_ui_state_unlocked()
+        # Keep the on-disk schema normalized even when the file was missing/corrupt.
+        _save_ui_state_unlocked(ui_state)
+        watched_snapshot = [dict(item) for item in ui_state["watched_folders"]]
+        recent_snapshot = [dict(item) for item in ui_state["recent_demos"]]
+        selected_demo_path = ui_state.get("selected_demo_path")
+
+    watched_folders, discovered_demos = _scan_watched_demos(watched_snapshot)
+    return {
+        "ok": True,
+        "watched_folders": watched_folders,
+        "recent_demos": _recent_demos_payload(recent_snapshot),
+        "discovered_demos": discovered_demos,
+        "selected_demo_path": selected_demo_path,
+        "scanned_at": _utc_iso_now(),
+    }
 
 
 def _clean_old_clips(demo_path: str) -> int:
@@ -269,19 +512,121 @@ def api_browse():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
+@app.route("/api/browse-folder")
+def api_browse_folder():
+    try:
+        from tkinter import Tk, filedialog
+
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title="Select Demo Watch Folder")
+        root.destroy()
+        if path:
+            return jsonify({"ok": True, "path": path})
+        return jsonify({"ok": False, "error": "No folder selected."})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/library")
+def api_library():
+    return jsonify(_build_library_payload())
+
+
+@app.route("/api/library/select", methods=["POST"])
+def api_library_select():
+    data = request.get_json(silent=True) or {}
+    raw_demo_path = data.get("demo_path", "")
+    if not isinstance(raw_demo_path, str) or not raw_demo_path.strip():
+        return jsonify({"ok": False, "error": "No demo path provided."}), 400
+
+    demo_path = raw_demo_path.strip()
+    if not _is_demo_path(demo_path):
+        return jsonify({"ok": False, "error": "demo_path must end with .dem"}), 400
+
+    try:
+        normalized = _normalize_path(demo_path, strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"Invalid demo path: {exc}"}), 400
+
+    with _ui_state_lock:
+        ui_state = _load_ui_state_unlocked()
+        ui_state["selected_demo_path"] = normalized
+        _save_ui_state_unlocked(ui_state)
+
+    return jsonify({"ok": True, "selected_demo_path": normalized})
+
+
+@app.route("/api/library/watch/add", methods=["POST"])
+def api_library_watch_add():
+    data = request.get_json(silent=True) or {}
+    raw_folder_path = data.get("folder_path", "")
+    if not isinstance(raw_folder_path, str) or not raw_folder_path.strip():
+        return jsonify({"ok": False, "error": "No folder path provided."}), 400
+
+    try:
+        normalized = _normalize_path(raw_folder_path.strip(), strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return jsonify({"ok": False, "error": "Folder not found."}), 400
+
+    folder = Path(normalized)
+    if not folder.is_dir():
+        return jsonify({"ok": False, "error": "Path is not a directory."}), 400
+
+    new_key = _path_key(normalized)
+    with _ui_state_lock:
+        ui_state = _load_ui_state_unlocked()
+        watched = ui_state["watched_folders"]
+        if all(_path_key(str(item.get("path", ""))) != new_key for item in watched):
+            watched.append({"path": normalized, "recursive": True})
+            _save_ui_state_unlocked(ui_state)
+        else:
+            # Keep on-disk format normalized.
+            _save_ui_state_unlocked(ui_state)
+
+    return jsonify(_build_library_payload())
+
+
+@app.route("/api/library/watch/remove", methods=["POST"])
+def api_library_watch_remove():
+    data = request.get_json(silent=True) or {}
+    raw_folder_path = data.get("folder_path", "")
+    if not isinstance(raw_folder_path, str) or not raw_folder_path.strip():
+        return jsonify({"ok": False, "error": "No folder path provided."}), 400
+
+    try:
+        normalized = _normalize_path(raw_folder_path.strip(), strict=False)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": f"Invalid folder path: {exc}"}), 400
+
+    remove_key = _path_key(normalized)
+    with _ui_state_lock:
+        ui_state = _load_ui_state_unlocked()
+        ui_state["watched_folders"] = [
+            item
+            for item in ui_state["watched_folders"]
+            if _path_key(str(item.get("path", ""))) != remove_key
+        ]
+        _save_ui_state_unlocked(ui_state)
+
+    return jsonify(_build_library_payload())
+
+
 @app.route("/api/load", methods=["POST"])
 def api_load():
     data = request.get_json(silent=True) or {}
-    demo_path = data.get("demo_path", "").strip()
+    input_demo_path = data.get("demo_path", "").strip()
 
-    if not demo_path:
+    if not input_demo_path:
         return jsonify({"ok": False, "error": "No demo path provided."}), 400
 
-    p = Path(demo_path)
+    p = Path(input_demo_path).expanduser()
     if not p.exists():
-        return jsonify({"ok": False, "error": f"File not found: {demo_path}"}), 400
+        return jsonify({"ok": False, "error": f"File not found: {input_demo_path}"}), 400
     if not p.suffix.lower() == ".dem":
         return jsonify({"ok": False, "error": "File must be a .dem file."}), 400
+    demo_path = str(p.resolve(strict=False))
 
     _reset_state()
 
@@ -299,6 +644,12 @@ def api_load():
     _state["header"] = header
     _state["kills_df"] = kills_df
     _state["player_slots"] = player_slots
+
+    with _ui_state_lock:
+        ui_state = _load_ui_state_unlocked()
+        ui_state["selected_demo_path"] = demo_path
+        _upsert_recent_demo(ui_state, demo_path)
+        _save_ui_state_unlocked(ui_state)
 
     # Extract dropdown values
     players = sorted(kills_df["attacker_name"].dropna().unique().tolist()) if "attacker_name" in kills_df.columns else []
@@ -373,6 +724,12 @@ def api_record():
         before = _parse_float_field(data, "before", 3.0, minimum=0.0)
         after = _parse_float_field(data, "after", 2.0, minimum=0.0)
         framerate = _parse_int_field(data, "framerate", 60, minimum=1)
+        hud_mode = _parse_str_choice_field(
+            data,
+            "hud_mode",
+            "deathnotices",
+            allowed=_HUD_MODES,
+        )
         launch = bool(_parse_bool(data.get("launch"), False))
     except (TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": f"Invalid record request: {exc}"}), 400
@@ -420,6 +777,7 @@ def api_record():
         framerate=framerate,
         output_path=out_dir,
         player_slots=_state["player_slots"] or {},
+        hud_mode=hud_mode,
     )
     sequences = builder.build_sequences(selected, demo_path)
     json_path = builder.write_json(sequences, demo_path)

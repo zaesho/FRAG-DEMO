@@ -143,6 +143,7 @@ class TestSequenceStructure:
         cmds = {a["cmd"] for a in seqs[0]["actions"]}
 
         assert "sv_cheats 1" in cmds
+        assert "cl_drawhud 1" in cmds
         assert "mirv_streams record startMovieWav 1" in cmds
         assert "mirv_streams record start" in cmds
         assert "mirv_streams record end" in cmds
@@ -237,6 +238,30 @@ class TestSequenceStructure:
         )
         assert end_tick > kill_tick
 
+    def test_spec_player_is_reapplied_at_start_and_kill_ticks(
+        self, tmp_path: Path
+    ) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            player_slots={"2": 9},
+        )
+        kill_tick = 10000
+        df = pd.DataFrame([_make_kill(tick=kill_tick, attacker="zywoo", steamid="2")])
+        seqs = builder.build_sequences(df, "match.dem")
+        actions = seqs[0]["actions"]
+
+        spec_player_ticks = [
+            action["tick"] for action in actions if action["cmd"] == "spec_player 9"
+        ]
+        start_tick = next(
+            a["tick"] for a in actions if a["cmd"] == "mirv_streams record start"
+        )
+
+        assert len(spec_player_ticks) >= 3
+        assert start_tick in spec_player_ticks
+        assert kill_tick in spec_player_ticks
+
     def test_record_name_uses_sanitized_attacker_name(
         self, builder: SequenceBuilder
     ) -> None:
@@ -319,6 +344,32 @@ class TestSequenceStructure:
 
         assert spec_mode_index < spec_player_index
 
+    def test_hud_mode_all_keeps_full_hud(self, tmp_path: Path) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            hud_mode="all",
+        )
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        cmds = {a["cmd"] for a in seqs[0]["actions"]}
+
+        assert "cl_drawhud 1" in cmds
+        assert "cl_draw_only_deathnotices 0" in cmds
+
+    def test_hud_mode_none_hides_hud(self, tmp_path: Path) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            hud_mode="none",
+        )
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        cmds = {a["cmd"] for a in seqs[0]["actions"]}
+
+        assert "cl_drawhud 0" in cmds
+        assert "cl_draw_only_deathnotices 0" in cmds
+
 
 class TestWriteJson:
     def test_creates_file(self, builder: SequenceBuilder, tmp_path: Path) -> None:
@@ -399,3 +450,7 @@ class TestBuilderValidation:
     def test_non_positive_framerate_rejected(self) -> None:
         with pytest.raises(ValueError, match="framerate"):
             SequenceBuilder(framerate=0)
+
+    def test_invalid_hud_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="hud_mode"):
+            SequenceBuilder(hud_mode="bad-mode")
