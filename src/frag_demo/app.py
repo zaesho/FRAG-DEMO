@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import threading
 import webbrowser
 from pathlib import Path
@@ -32,6 +34,7 @@ app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # Disable static file caching
 
 _CS2_TICKRATE = 64  # CS2 always uses 64 tick (sub-tick system)
 _KILL_ID_COL = "kill_id"
+_RECORD_NAME_RE = re.compile(r'^mirv_streams record name "(.+)"$')
 
 # ---------------------------------------------------------------------------
 # Server-side state (single-user desktop tool)
@@ -161,6 +164,47 @@ def _clean_old_clips(demo_path: str) -> int:
             removed += 1
 
     return removed
+
+
+def _expected_clip_dirs_from_json(json_path: Path) -> list[Path]:
+    """Return clip directories referenced by MIRV in the actions JSON."""
+    if not json_path.exists():
+        return []
+
+    try:
+        loaded = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    if not isinstance(loaded, list):
+        return []
+
+    clip_dirs: list[Path] = []
+    seen: set[str] = set()
+
+    for sequence in loaded:
+        if not isinstance(sequence, dict):
+            continue
+        actions = sequence.get("actions")
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            cmd = action.get("cmd")
+            if not isinstance(cmd, str):
+                continue
+            match = _RECORD_NAME_RE.match(cmd)
+            if match is None:
+                continue
+            clip_dir = Path(match.group(1))
+            key = str(clip_dir)
+            if key in seen:
+                continue
+            seen.add(key)
+            clip_dirs.append(clip_dir)
+
+    return clip_dirs
 
 
 def _is_cs2_running() -> bool:
@@ -462,17 +506,34 @@ def api_encode():
     demo_path = _state["demo_path"]
     demo_stem = Path(demo_path).stem
     demo_dir = Path(demo_path).parent
+    json_path = Path(demo_path).with_name(Path(demo_path).name + ".json")
 
-    # Find all clip directories matching this demo
-    clip_dirs = sorted(
-        d for d in demo_dir.iterdir()
-        if d.is_dir() and d.name.startswith(demo_stem + "_")
-    )
+    expected_clip_dirs = _expected_clip_dirs_from_json(json_path)
+    clip_dirs = [clip_dir for clip_dir in expected_clip_dirs if clip_dir.is_dir()]
+
+    # Fallback for older JSON files or manually-created recordings.
+    if not clip_dirs:
+        clip_dirs = sorted(
+            d for d in demo_dir.iterdir()
+            if d.is_dir() and d.name.startswith(demo_stem + "_")
+        )
 
     if not clip_dirs:
+        if expected_clip_dirs:
+            expected = ", ".join(str(path) for path in expected_clip_dirs[:3])
+            if len(expected_clip_dirs) > 3:
+                expected += ", ..."
+            error = (
+                "No recorded clip directories were found for the generated JSON. "
+                f"Expected: {expected}"
+            )
+        else:
+            error = (
+                f"No clip directories found matching '{demo_stem}_*' in {demo_dir}"
+            )
         return jsonify({
             "ok": False,
-            "error": f"No clip directories found matching '{demo_stem}_*' in {demo_dir}",
+            "error": error,
         }), 400
 
     encoder = VideoEncoder()

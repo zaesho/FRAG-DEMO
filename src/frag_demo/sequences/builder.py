@@ -196,7 +196,7 @@ class SequenceBuilder:
             # Spectate command
             # ----------------------------------------------------------
             # Prefer entity slot if we have it (spec_player <slot>).
-            # Fall back to account-ID based command, or plain spec_mode 1.
+            # For CS2 the slot-based command is the reliable path.
             attacker_steamid_key = None
             if attacker_steamid_col:
                 steamid_value = first_row.get(attacker_steamid_col)
@@ -208,18 +208,14 @@ class SequenceBuilder:
                 slot = self.player_slots.get(attacker_steamid_key)
             if slot is None:
                 slot = self.player_slots.get(attacker_name)
+
+            spec_actions: list[dict[str, Any]] = [
+                {"tick": self._valid_tick(setup_tick), "cmd": "spec_mode 1"},
+            ]
             if slot is not None:
-                spec_cmd = f"spec_player {slot}"
-            elif attacker_steamid_col and not pd.isna(first_row.get(attacker_steamid_col)):
-                # Derive the 32-bit Steam account ID from the 64-bit SteamID.
-                try:
-                    steam64 = int(first_row[attacker_steamid_col])
-                    account_id = steam64 & 0xFFFFFFFF
-                    spec_cmd = f"spec_lock_to_accountid {account_id}"
-                except (ValueError, TypeError):
-                    spec_cmd = "spec_mode 1"
-            else:
-                spec_cmd = "spec_mode 1"
+                spec_actions.append(
+                    {"tick": self._valid_tick(setup_tick), "cmd": f"spec_player {slot}"}
+                )
 
             # ----------------------------------------------------------
             # Build the actions list
@@ -228,11 +224,23 @@ class SequenceBuilder:
             global_setup_tick = self._MIN_VALID_TICK
 
             if self.recording_system == "hlae":
+                record_setup_cmds = [
+                    "mirv_streams record startMovieWav 1",
+                    'mirv_streams record name "' + clip_path_unix + '"',
+                    "mirv_streams record fps " + str(self.framerate),
+                ]
                 record_start_cmd = "mirv_streams record start"
                 record_end_cmd = "mirv_streams record end"
+                post_record_cmds: list[dict[str, Any]] = []
             else:
+                record_setup_cmds = [
+                    "host_framerate " + str(self.framerate),
+                ]
                 record_start_cmd = 'startmovie "' + clip_path_unix + '" tga'
                 record_end_cmd = "endmovie"
+                post_record_cmds = [
+                    {"tick": self._valid_tick(end_tick), "cmd": "host_framerate 0"},
+                ]
 
             actions: list[dict[str, Any]] = [
                 # ---- Global setup (tick 64) ----
@@ -259,26 +267,20 @@ class SequenceBuilder:
                 # ---- Per-clip setup (setup_tick) ----
                 {"tick": self._valid_tick(setup_tick), "cmd": "mirv_deathmsg clear"},
                 {"tick": self._valid_tick(setup_tick), "cmd": "spec_show_xray 0"},
-                # First-person POV locked to the killer
-                {"tick": self._valid_tick(setup_tick), "cmd": spec_cmd},
-                {"tick": self._valid_tick(setup_tick), "cmd": "spec_mode 6"},
-                {"tick": self._valid_tick(setup_tick), "cmd": "spec_autodirector 0"},
+                # First-person POV locked to the killer.
+                *spec_actions,
+                *[
+                    {"tick": self._valid_tick(setup_tick), "cmd": cmd}
+                    for cmd in record_setup_cmds
+                ],
                 # ---- Pause just before recording to clear loading screen ----
                 {"tick": self._valid_tick(pause_tick), "cmd": "pause_playback"},
-                {
-                    "tick": self._valid_tick(setup_tick),
-                    "cmd": "mirv_streams record name " + '"' + clip_path_unix + '"',
-                },
-                {
-                    "tick": self._valid_tick(start_tick),
-                    "cmd": "host_framerate " + str(self.framerate),
-                },
                 {
                     "tick": self._valid_tick(start_tick),
                     "cmd": record_start_cmd,
                 },
                 {"tick": self._valid_tick(end_tick), "cmd": record_end_cmd},
-                {"tick": self._valid_tick(end_tick), "cmd": "host_framerate 0"},
+                *post_record_cmds,
                 # ---- Advance to next sequence ----
                 {"tick": self._valid_tick(next_seq_tick), "cmd": "go_to_next_sequence"},
             ]

@@ -182,3 +182,53 @@ class TestRecord:
         assert response.status_code == 200
         assert captured_kwargs["start_seconds_before"] == 0.0
         assert captured_kwargs["end_seconds_after"] == 0.0
+
+
+class TestEncode:
+    def test_encode_uses_clip_dirs_from_generated_json(
+        self, client, tmp_path: Path, monkeypatch
+    ) -> None:
+        demo_path = tmp_path / "match.dem"
+        demo_path.touch()
+
+        clip_dir = tmp_path / "custom_clip_output"
+        take_dir = clip_dir / "take0000"
+        take_dir.mkdir(parents=True)
+        (take_dir / "00000.tga").touch()
+        (take_dir / "00001.tga").touch()
+
+        json_path = demo_path.with_name(demo_path.name + ".json")
+        json_path.write_text(
+            (
+                '[{"actions": ['
+                f'{{"tick": 64, "cmd": "mirv_streams record name \\"{clip_dir.as_posix()}\\""}}'
+                "]}]"
+            ),
+            encoding="utf-8",
+        )
+
+        app_module._state["demo_path"] = str(demo_path)
+
+        captured_inputs: list[str] = []
+
+        class StubEncoder:
+            def encode_sequence(
+                self, input_dir: str, output_path: str, framerate: int = 60
+            ) -> None:
+                captured_inputs.append(input_dir)
+
+            def concatenate(self, video_paths: list[str], output_path: str) -> None:
+                raise AssertionError("concatenate should not be called for one clip")
+
+        monkeypatch.setattr(app_module, "VideoEncoder", StubEncoder)
+
+        response = client.post(
+            "/api/encode",
+            json={"framerate": 60, "concatenate": True},
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["ok"] is True
+        assert payload["encoded"] == ["custom_clip_output.mp4"]
+        assert captured_inputs == [str(take_dir)]

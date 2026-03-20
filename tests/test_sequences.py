@@ -143,9 +143,21 @@ class TestSequenceStructure:
         cmds = {a["cmd"] for a in seqs[0]["actions"]}
 
         assert "sv_cheats 1" in cmds
+        assert "mirv_streams record startMovieWav 1" in cmds
         assert "mirv_streams record start" in cmds
         assert "mirv_streams record end" in cmds
         assert any("go_to_next_sequence" in c for c in cmds)
+
+    def test_hlae_uses_mirv_record_fps_not_host_framerate(
+        self, builder: SequenceBuilder
+    ) -> None:
+        df = pd.DataFrame([_make_kill(tick=10000)])
+        seqs = builder.build_sequences(df, "match.dem")
+        cmds = [a["cmd"] for a in seqs[0]["actions"]]
+
+        assert "mirv_streams record fps 60" in cmds
+        assert "host_framerate 60" not in cmds
+        assert "host_framerate 0" not in cmds
 
     def test_actions_sorted_by_tick(self, builder: SequenceBuilder) -> None:
         df = pd.DataFrame([_make_kill(tick=10000)])
@@ -281,6 +293,31 @@ class TestSequenceStructure:
             if a["cmd"].startswith("spec_player")
         )
         assert spec_cmd == "spec_player 9"
+
+    def test_spec_mode_precedes_spec_player_at_setup_tick(
+        self, tmp_path: Path
+    ) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            player_slots={"2": 9},
+        )
+        df = pd.DataFrame([_make_kill(tick=10000, attacker="zywoo", steamid="2")])
+        seqs = builder.build_sequences(df, "match.dem")
+        actions = seqs[0]["actions"]
+
+        spec_mode_index = next(
+            index
+            for index, action in enumerate(actions)
+            if action["cmd"] == "spec_mode 1"
+        )
+        spec_player_index = next(
+            index
+            for index, action in enumerate(actions)
+            if action["cmd"] == "spec_player 9"
+        )
+
+        assert spec_mode_index < spec_player_index
 
 
 class TestWriteJson:

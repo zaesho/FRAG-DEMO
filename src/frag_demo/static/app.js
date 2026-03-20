@@ -70,6 +70,7 @@ function updateCS2State(running) {
         badge.style.display = "none";
     }
     updateRecordButton();
+    updateEncodeButton();
 }
 
 async function pollStatus() {
@@ -365,6 +366,17 @@ function updateRecordButton() {
     }
 }
 
+function updateEncodeButton() {
+    const btn = $("#btn-encode");
+    if (cs2Running) {
+        btn.textContent = "Wait For CS2";
+        btn.disabled = true;
+    } else {
+        btn.textContent = "Encode Clips";
+        btn.disabled = false;
+    }
+}
+
 // -- Recording --
 async function startRecord(launch) {
     if (queue.size === 0) {
@@ -489,6 +501,11 @@ async function cleanClips() {
 
 // -- Encoding --
 async function encodeClips() {
+    if (cs2Running) {
+        logOutput("Wait for CS2 to finish recording before encoding.", "log-error");
+        return;
+    }
+
     const framerateValue = parseInt($("#rec-framerate").value, 10);
     const framerate = Number.isNaN(framerateValue) ? 60 : framerateValue;
 
@@ -554,4 +571,5 @@ document.addEventListener("DOMContentLoaded", () => {
 
     pollStatus();
     setInterval(pollStatus, 5000);
+    updateEncodeButton();
 });
