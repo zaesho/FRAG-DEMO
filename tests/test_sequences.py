@@ -216,6 +216,26 @@ class TestSequenceStructure:
         )
         assert next_seq_tick > end_tick
 
+    def test_last_sequence_quits_when_close_game_after_recording_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        builder = SequenceBuilder(
+            tickrate=TICKRATE,
+            output_path=str(tmp_path),
+            close_game_after_recording=True,
+        )
+        df = pd.DataFrame(
+            [_make_kill(tick=10000), _make_kill(tick=12000, attacker="s1mple", steamid="2")]
+        )
+        seqs = builder.build_sequences(df, "match.dem")
+
+        first_cmds = {action["cmd"] for action in seqs[0]["actions"]}
+        second_cmds = {action["cmd"] for action in seqs[1]["actions"]}
+
+        assert "go_to_next_sequence" in first_cmds
+        assert "quit" in second_cmds
+        assert "go_to_next_sequence" not in second_cmds
+
     def test_start_tick_before_kill(self, builder: SequenceBuilder) -> None:
         kill_tick = 10000
         df = pd.DataFrame([_make_kill(tick=kill_tick)])

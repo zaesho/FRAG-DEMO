@@ -424,6 +424,94 @@ class TestRecord:
 
         assert response.status_code == 400
 
+    def test_launch_auto_closes_and_auto_encodes_after_recording(
+        self, client, tmp_path: Path, monkeypatch
+    ) -> None:
+        demo_path = tmp_path / "match.dem"
+        demo_path.touch()
+        plugin_dll = tmp_path / "server.dll"
+        plugin_dll.write_bytes(b"\x00")
+
+        app_module._state["demo_path"] = str(demo_path)
+        app_module._state["header"] = {"tickrate": 64}
+        app_module._state["player_slots"] = {}
+        app_module._state["kills_df"] = pd.DataFrame(
+            [
+                {
+                    app_module._KILL_ID_COL: 0,
+                    "tick": 1000,
+                    "attacker_name": "NiKo",
+                    "attacker_steamid": "1",
+                }
+            ]
+        )
+
+        captured_builder_kwargs: dict[str, object] = {}
+        launched_demo_paths: list[str] = []
+        auto_encoded: list[tuple[str, int, bool]] = []
+
+        class StubBuilder:
+            def __init__(self, **kwargs) -> None:
+                captured_builder_kwargs.update(kwargs)
+
+            def build_sequences(self, selected: pd.DataFrame, demo_path: str):
+                return [{"actions": [{"tick": 64, "cmd": "sv_cheats 1"}]}]
+
+            def write_json(self, sequences, demo_path: str) -> Path:
+                out_path = Path(demo_path).with_name(Path(demo_path).name + ".json")
+                out_path.write_text("[]", encoding="utf-8")
+                return out_path
+
+        class StubLauncher:
+            def __init__(self) -> None:
+                self.hlae_path = "HLAE.exe"
+                self.cs2_path = "cs2.exe"
+
+            def find_plugin_dll(self) -> Path:
+                return plugin_dll
+
+            def launch(self, demo_path: str) -> None:
+                launched_demo_paths.append(demo_path)
+
+        class InlineThread:
+            def __init__(self, target, daemon: bool = False) -> None:
+                self.target = target
+                self.daemon = daemon
+
+            def start(self) -> None:
+                self.target()
+
+        def fake_auto_encode(
+            demo_path: str, *, framerate: int, concatenate: bool = True
+        ) -> dict[str, object]:
+            auto_encoded.append((demo_path, framerate, concatenate))
+            return {"ok": True, "encoded": ["clip.mp4"], "errors": []}
+
+        monkeypatch.setattr(app_module, "SequenceBuilder", StubBuilder)
+        monkeypatch.setattr(app_module, "CS2Launcher", StubLauncher)
+        monkeypatch.setattr(app_module.threading, "Thread", InlineThread)
+        monkeypatch.setattr(app_module, "_encode_recorded_clips", fake_auto_encode)
+        monkeypatch.setattr(app_module, "_is_cs2_running", lambda: False)
+
+        response = client.post(
+            "/api/record",
+            json={
+                "selected_ids": [0],
+                "before": 2.0,
+                "after": 1.0,
+                "framerate": 60,
+                "launch": True,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["ok"] is True
+        assert payload["launched"] is True
+        assert captured_builder_kwargs["close_game_after_recording"] is True
+        assert launched_demo_paths == [str(demo_path)]
+        assert auto_encoded == [(str(demo_path), 60, True)]
+
 
 class TestEncode:
     def test_encode_uses_clip_dirs_from_generated_json(

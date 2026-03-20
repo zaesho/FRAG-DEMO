@@ -74,12 +74,13 @@ class SequenceBuilder:
         self,
         tickrate: float = 64.0,
         recording_system: str = "hlae",
-        start_seconds_before: float = 3.0,
-        end_seconds_after: float = 2.0,
+        start_seconds_before: float = 2.0,
+        end_seconds_after: float = 1.0,
         framerate: int = 60,
         output_path: str = "output",
         player_slots: dict[str, int] | None = None,
         hud_mode: str = "deathnotices",
+        close_game_after_recording: bool = False,
     ) -> None:
         self.tickrate = float(tickrate)
         if self.tickrate <= 0:
@@ -101,6 +102,7 @@ class SequenceBuilder:
         self.framerate = framerate
         self.output_path = output_path
         self.hud_mode = normalized_hud_mode
+        self.close_game_after_recording = close_game_after_recording
         # Maps stable player identity -> entity slot number for spec_player commands.
         self.player_slots: dict[str, int] = player_slots or {}
 
@@ -310,8 +312,15 @@ class SequenceBuilder:
                 },
                 {"tick": self._valid_tick(end_tick), "cmd": record_end_cmd},
                 *post_record_cmds,
-                # ---- Advance to next sequence ----
-                {"tick": self._valid_tick(next_seq_tick), "cmd": "go_to_next_sequence"},
+                # ---- Advance to next sequence / exit on final sequence ----
+                {
+                    "tick": self._valid_tick(next_seq_tick),
+                    "cmd": (
+                        "quit"
+                        if self.close_game_after_recording and group_idx == len(groups) - 1
+                        else "go_to_next_sequence"
+                    ),
+                },
             ]
 
             # Sort actions by tick (they should already be, but be safe)

@@ -4,6 +4,8 @@
 let currentKills = [];          // Last fetched kill list (from filters)
 let queue = new Map();          // kill_id -> kill object (the recording queue)
 let cs2Running = false;
+let autoEncodeRunning = false;
+let lastAutoEncodeEventId = 0;
 let selectedDemoPath = null;
 let watchedFolders = [];
 let recentDemos = [];
@@ -332,6 +334,7 @@ async function pollStatus() {
             clearLoadedState();
         }
         updateCS2State(data.cs2_running || false);
+        handleAutoEncodeStatus(data);
     } catch (e) {
         // ignore poll errors
     }
@@ -340,6 +343,7 @@ async function pollStatus() {
 function clearLoadedState() {
     currentKills = [];
     queue.clear();
+    autoEncodeRunning = false;
     updateStatus(false);
 
     const demoInfo = $("#demo-info");
@@ -355,6 +359,52 @@ function clearLoadedState() {
     renderTable([]);
     renderQueue();
     updateRecordButton();
+    updateEncodeButton();
+}
+
+async function handleAutoEncodeStatus(data) {
+    const running = Boolean(data.auto_encode_running);
+    const eventId = Number.isInteger(data.auto_encode_event_id) ? data.auto_encode_event_id : 0;
+    const lastResult = data.last_auto_encode && typeof data.last_auto_encode === "object"
+        ? data.last_auto_encode
+        : null;
+
+    if (running && (!autoEncodeRunning || eventId !== lastAutoEncodeEventId)) {
+        lastAutoEncodeEventId = eventId;
+        logOutput("CS2 finished recording. Auto-encoding clips...", "log-success");
+    }
+
+    autoEncodeRunning = running;
+    updateEncodeButton();
+
+    if (!running && lastResult) {
+        const resultEventId = Number.isInteger(lastResult.event_id) ? lastResult.event_id : eventId;
+        if (resultEventId > lastAutoEncodeEventId) {
+            if (Array.isArray(lastResult.encoded)) {
+                for (const name of lastResult.encoded) {
+                    logOutput("  Encoded: " + name, "log-success");
+                }
+            }
+            if (lastResult.concatenated) {
+                logOutput("  Combined: " + lastResult.concatenated, "log-success");
+            }
+            if (Array.isArray(lastResult.errors)) {
+                for (const error of lastResult.errors) {
+                    logOutput("  " + error, "log-error");
+                }
+            }
+            if (lastResult.ok) {
+                logOutput("Auto-encoding finished.", "log-success");
+                await loadClips();
+            } else {
+                logOutput(
+                    "Auto-encoding failed: " + (lastResult.error || "see errors above"),
+                    "log-error",
+                );
+            }
+            lastAutoEncodeEventId = resultEventId;
+        }
+    }
 }
 
 // -- Demo loading --
@@ -647,6 +697,9 @@ function updateEncodeButton() {
     if (cs2Running) {
         btn.textContent = "Wait For CS2";
         btn.disabled = true;
+    } else if (autoEncodeRunning) {
+        btn.textContent = "Encoding...";
+        btn.disabled = true;
     } else {
         btn.textContent = "Encode Clips";
         btn.disabled = false;
@@ -664,8 +717,8 @@ async function startRecord(launch) {
     const afterValue = parseFloat($("#rec-after").value);
     const framerateValue = parseInt($("#rec-framerate").value, 10);
     const hudMode = $("#rec-hud-mode").value || "deathnotices";
-    const before = Number.isNaN(beforeValue) ? 3.0 : beforeValue;
-    const after = Number.isNaN(afterValue) ? 2.0 : afterValue;
+    const before = Number.isNaN(beforeValue) ? 2.0 : beforeValue;
+    const after = Number.isNaN(afterValue) ? 1.0 : afterValue;
     const framerate = Number.isNaN(framerateValue) ? 60 : framerateValue;
     const selectedIds = Array.from(queue.keys());
 
@@ -778,7 +831,7 @@ async function cleanClips() {
 
 // -- Encoding --
 async function encodeClips() {
-    if (cs2Running) {
+    if (cs2Running || autoEncodeRunning) {
         logOutput("Wait for CS2 to finish recording before encoding.", "log-error");
         return;
     }

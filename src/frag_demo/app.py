@@ -57,6 +57,12 @@ _state: dict[str, Any] = {
 _launch_lock = threading.Lock()
 _cs2_running = False
 _ui_state_lock = threading.Lock()
+_auto_encode_lock = threading.Lock()
+_auto_encode_status: dict[str, Any] = {
+    "running": False,
+    "event_id": 0,
+    "last_result": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +456,159 @@ def _expected_clip_dirs_from_json(json_path: Path) -> list[Path]:
     return clip_dirs
 
 
+def _reset_auto_encode_status() -> None:
+    """Clear any previous auto-encode result for a new recording run."""
+    with _auto_encode_lock:
+        _auto_encode_status["running"] = False
+        _auto_encode_status["last_result"] = None
+
+
+def _begin_auto_encode() -> None:
+    """Mark the automatic encode job as running."""
+    with _auto_encode_lock:
+        _auto_encode_status["event_id"] = int(_auto_encode_status["event_id"]) + 1
+        _auto_encode_status["running"] = True
+        _auto_encode_status["last_result"] = None
+
+
+def _finish_auto_encode(result: dict[str, Any]) -> None:
+    """Store the automatic encode result for status polling."""
+    with _auto_encode_lock:
+        _auto_encode_status["event_id"] = int(_auto_encode_status["event_id"]) + 1
+        stored = dict(result)
+        stored["event_id"] = _auto_encode_status["event_id"]
+        _auto_encode_status["running"] = False
+        _auto_encode_status["last_result"] = stored
+
+
+def _auto_encode_snapshot() -> dict[str, Any]:
+    """Return a shallow copy of the current auto-encode state."""
+    with _auto_encode_lock:
+        return {
+            "auto_encode_running": bool(_auto_encode_status["running"]),
+            "auto_encode_event_id": int(_auto_encode_status["event_id"]),
+            "last_auto_encode": (
+                dict(_auto_encode_status["last_result"])
+                if isinstance(_auto_encode_status["last_result"], dict)
+                else None
+            ),
+        }
+
+
+def _find_recorded_clip_dirs(demo_path: str) -> tuple[list[Path], str | None]:
+    """Return recorded clip directories and an error message when none exist."""
+    demo_path_obj = Path(demo_path)
+    demo_stem = demo_path_obj.stem
+    demo_dir = demo_path_obj.parent
+    json_path = demo_path_obj.with_name(demo_path_obj.name + ".json")
+
+    expected_clip_dirs = _expected_clip_dirs_from_json(json_path)
+    clip_dirs = [clip_dir for clip_dir in expected_clip_dirs if clip_dir.is_dir()]
+
+    if not clip_dirs:
+        clip_dirs = sorted(
+            d for d in demo_dir.iterdir()
+            if d.is_dir() and d.name.startswith(demo_stem + "_")
+        )
+
+    if clip_dirs:
+        return clip_dirs, None
+
+    if expected_clip_dirs:
+        expected = ", ".join(str(path) for path in expected_clip_dirs[:3])
+        if len(expected_clip_dirs) > 3:
+            expected += ", ..."
+        return [], (
+            "No recorded clip directories were found for the generated JSON. "
+            f"Expected: {expected}"
+        )
+
+    return [], f"No clip directories found matching '{demo_stem}_*' in {demo_dir}"
+
+
+def _encode_recorded_clips(
+    demo_path: str,
+    *,
+    framerate: int,
+    concatenate: bool = True,
+) -> dict[str, Any]:
+    """Encode recorded MIRV clip directories into MP4 files."""
+    demo_path_obj = Path(demo_path)
+    demo_stem = demo_path_obj.stem
+    demo_dir = demo_path_obj.parent
+
+    clip_dirs, error = _find_recorded_clip_dirs(demo_path)
+    if not clip_dirs:
+        return {
+            "ok": False,
+            "encoded": [],
+            "errors": [],
+            "error": error,
+        }
+
+    encoder = VideoEncoder()
+    encoded_videos: list[str] = []
+    errors: list[str] = []
+
+    for clip_dir in clip_dirs:
+        take_dir = None
+
+        if any(clip_dir.glob("*.tga")):
+            take_dir = clip_dir
+        else:
+            takes = sorted(
+                d for d in clip_dir.iterdir()
+                if d.is_dir() and d.name.startswith("take")
+            )
+            for t in reversed(takes):
+                if any(t.glob("*.tga")):
+                    take_dir = t
+                    break
+
+        if take_dir is None:
+            errors.append(f"{clip_dir.name}: no TGA frames found")
+            continue
+
+        tga_count = len(list(take_dir.glob("*.tga")))
+        if tga_count == 0:
+            errors.append(f"{clip_dir.name}: no TGA frames found")
+            continue
+
+        output_mp4 = clip_dir.with_suffix(".mp4")
+        try:
+            print(f"[frag-demo] Encoding {clip_dir.name} ({tga_count} frames)...")
+            encoder.encode_sequence(
+                input_dir=str(take_dir),
+                output_path=str(output_mp4),
+                framerate=framerate,
+            )
+            encoded_videos.append(str(output_mp4))
+            print(f"[frag-demo] -> {output_mp4.name}")
+        except Exception as exc:
+            errors.append(f"{clip_dir.name}: {exc}")
+
+    result: dict[str, Any] = {
+        "ok": len(encoded_videos) > 0,
+        "encoded": [str(Path(v).name) for v in encoded_videos],
+        "errors": errors,
+    }
+
+    if concatenate and len(encoded_videos) > 1:
+        concat_output = demo_dir / f"{demo_stem}_all.mp4"
+        try:
+            print(f"[frag-demo] Concatenating {len(encoded_videos)} clips...")
+            encoder.concatenate(encoded_videos, str(concat_output))
+            result["concatenated"] = str(concat_output)
+            print(f"[frag-demo] -> {concat_output.name}")
+        except Exception as exc:
+            errors.append(f"Concatenation failed: {exc}")
+
+    if not result["ok"] and "error" not in result and errors:
+        result["error"] = "Encoding failed"
+
+    return result
+
+
 def _is_cs2_running() -> bool:
     """Check if cs2.exe is currently running."""
     import subprocess
@@ -487,6 +646,7 @@ def api_status():
         "loaded": _state["demo_path"] is not None,
         "cs2_running": _is_cs2_running(),
     }
+    result.update(_auto_encode_snapshot())
     if _state["demo_path"]:
         result["demo_path"] = _state["demo_path"]
         result["map"] = _state["header"].get("map_name", "?") if _state["header"] else "?"
@@ -721,8 +881,8 @@ def api_record():
     selected_ids = data.get("selected_ids")
     selected_ticks = data.get("selected_ticks", [])
     try:
-        before = _parse_float_field(data, "before", 3.0, minimum=0.0)
-        after = _parse_float_field(data, "after", 2.0, minimum=0.0)
+        before = _parse_float_field(data, "before", 2.0, minimum=0.0)
+        after = _parse_float_field(data, "after", 1.0, minimum=0.0)
         framerate = _parse_int_field(data, "framerate", 60, minimum=1)
         hud_mode = _parse_str_choice_field(
             data,
@@ -778,6 +938,7 @@ def api_record():
         output_path=out_dir,
         player_slots=_state["player_slots"] or {},
         hud_mode=hud_mode,
+        close_game_after_recording=launch,
     )
     sequences = builder.build_sequences(selected, demo_path)
     json_path = builder.write_json(sequences, demo_path)
@@ -816,6 +977,7 @@ def api_record():
             return jsonify(result), 400
 
         result["diagnostics"] = diagnostics
+        _reset_auto_encode_status()
 
         with _launch_lock:
             if _cs2_running or _is_cs2_running():
@@ -832,6 +994,20 @@ def api_record():
             global _cs2_running
             try:
                 launcher.launch(demo_path=demo_path)
+                _begin_auto_encode()
+                auto_encode_result = _encode_recorded_clips(
+                    demo_path,
+                    framerate=framerate,
+                    concatenate=True,
+                )
+                _finish_auto_encode(auto_encode_result)
+            except Exception as exc:
+                _finish_auto_encode({
+                    "ok": False,
+                    "encoded": [],
+                    "errors": [],
+                    "error": f"Auto-encode failed: {exc}",
+                })
             finally:
                 with _launch_lock:
                     _cs2_running = False
@@ -861,102 +1037,13 @@ def api_encode():
     except (TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": f"Invalid encode request: {exc}"}), 400
 
-    demo_path = _state["demo_path"]
-    demo_stem = Path(demo_path).stem
-    demo_dir = Path(demo_path).parent
-    json_path = Path(demo_path).with_name(Path(demo_path).name + ".json")
-
-    expected_clip_dirs = _expected_clip_dirs_from_json(json_path)
-    clip_dirs = [clip_dir for clip_dir in expected_clip_dirs if clip_dir.is_dir()]
-
-    # Fallback for older JSON files or manually-created recordings.
-    if not clip_dirs:
-        clip_dirs = sorted(
-            d for d in demo_dir.iterdir()
-            if d.is_dir() and d.name.startswith(demo_stem + "_")
-        )
-
-    if not clip_dirs:
-        if expected_clip_dirs:
-            expected = ", ".join(str(path) for path in expected_clip_dirs[:3])
-            if len(expected_clip_dirs) > 3:
-                expected += ", ..."
-            error = (
-                "No recorded clip directories were found for the generated JSON. "
-                f"Expected: {expected}"
-            )
-        else:
-            error = (
-                f"No clip directories found matching '{demo_stem}_*' in {demo_dir}"
-            )
-        return jsonify({
-            "ok": False,
-            "error": error,
-        }), 400
-
-    encoder = VideoEncoder()
-    encoded_videos: list[str] = []
-    errors: list[str] = []
-
-    for clip_dir in clip_dirs:
-        # Find TGA frames — could be in:
-        #   1. clip_dir/ directly (startmovie output)
-        #   2. clip_dir/take0000/ (MIRV streams output)
-        take_dir = None
-
-        # Check clip_dir itself first
-        if any(clip_dir.glob("*.tga")):
-            take_dir = clip_dir
-        else:
-            # Check take subdirectories (use latest with TGA files)
-            takes = sorted(
-                d for d in clip_dir.iterdir()
-                if d.is_dir() and d.name.startswith("take")
-            )
-            for t in reversed(takes):
-                if any(t.glob("*.tga")):
-                    take_dir = t
-                    break
-
-        if take_dir is None:
-            errors.append(f"{clip_dir.name}: no TGA frames found")
-            continue
-
-        tga_count = len(list(take_dir.glob("*.tga")))
-        if tga_count == 0:
-            errors.append(f"{clip_dir.name}: no TGA frames found")
-            continue
-
-        output_mp4 = clip_dir.with_suffix(".mp4")
-        try:
-            print(f"[frag-demo] Encoding {clip_dir.name} ({tga_count} frames)...")
-            encoder.encode_sequence(
-                input_dir=str(take_dir),
-                output_path=str(output_mp4),
-                framerate=framerate,
-            )
-            encoded_videos.append(str(output_mp4))
-            print(f"[frag-demo] -> {output_mp4.name}")
-        except Exception as exc:
-            errors.append(f"{clip_dir.name}: {exc}")
-
-    result: dict[str, Any] = {
-        "ok": len(encoded_videos) > 0,
-        "encoded": [str(Path(v).name) for v in encoded_videos],
-        "errors": errors,
-    }
-
-    # Concatenate all clips into one video
-    if concatenate and len(encoded_videos) > 1:
-        concat_output = demo_dir / f"{demo_stem}_all.mp4"
-        try:
-            print(f"[frag-demo] Concatenating {len(encoded_videos)} clips...")
-            encoder.concatenate(encoded_videos, str(concat_output))
-            result["concatenated"] = str(concat_output)
-            print(f"[frag-demo] -> {concat_output.name}")
-        except Exception as exc:
-            errors.append(f"Concatenation failed: {exc}")
-
+    result = _encode_recorded_clips(
+        _state["demo_path"],
+        framerate=framerate,
+        concatenate=concatenate,
+    )
+    if not result["ok"] and result.get("error"):
+        return jsonify(result), 400
     return jsonify(result)
 
 
