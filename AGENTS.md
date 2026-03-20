@@ -12,8 +12,19 @@ frames into MP4 output.
 ## Architecture
 
 ```text
+server/
+  index.ts             Bun/Elysia API + watcher/upload orchestration
+  index.test.ts        Bun server integration tests
+web/
+  index.html           Vite entry HTML
+  src/
+    App.tsx            React operator UI
+    app.css            Bundled client styling
+    App.test.tsx       Frontend integration test
 src/frag_demo/
-  app.py              Flask desktop web UI entry point (console script: frag-demo)
+  app.py              Python launcher for the Bun app (console script: frag-demo)
+  runtime.py          Shared worker/runtime helpers
+  worker.py           Python worker bridge used by the Bun server
   parser/
     demo_parser.py    DemoAnalyzer — wraps demoparser2
   query/
@@ -24,17 +35,12 @@ src/frag_demo/
     cs2.py            CS2Launcher — HLAE + CS2 launch/helper logic
   encoder/
     ffmpeg.py         VideoEncoder — TGA/WAV -> MP4 + concat
-  static/
-    app.js            Web UI behavior
-    style.css         Web UI styling
-  templates/
-    index.html        Web UI shell
 tests/
-  test_app.py         Flask app API unit tests
   test_encoder.py     VideoEncoder unit tests
   test_launcher.py    CS2Launcher unit tests
   test_parser.py      DemoAnalyzer unit tests
   test_query.py       QueryEngine unit tests
+  test_runtime.py     Runtime helper unit tests
   test_sequences.py   SequenceBuilder unit tests
 ```
 
@@ -52,15 +58,17 @@ Data flow:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+bun install
 
 # Run tests
 pytest
+bun run test
 
 # Start the local web UI
-frag-demo
+bun run dev
 ```
 
-The app runs a local Flask server at `http://127.0.0.1:5000`.
+The app runs a Bun server with a React/Vite client at `http://127.0.0.1:5000`.
 On Windows PowerShell, activate the virtualenv with `.\.venv\Scripts\Activate.ps1`.
 
 ---
@@ -102,7 +110,6 @@ On Windows PowerShell, activate the virtualenv with `.\.venv\Scripts\Activate.ps
 | Package       | Purpose                              |
 |---------------|--------------------------------------|
 | demoparser2   | Parse CS2 `.dem` files               |
-| flask         | Local desktop web UI                 |
 | numpy         | JSON-safe numeric cleanup in the UI  |
 | pandas        | DataFrames for kill events           |
 | pytest (dev)  | Unit testing                         |

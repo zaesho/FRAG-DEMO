@@ -10,38 +10,40 @@ CS2 auto-broadcast replay creator. Parses CS2 `.dem` files, lets you select kill
 
 ```bash
 pip install -e ".[dev]"       # Install in editable mode with pytest
+bun install                   # Install Bun/React toolchain
 pytest                         # Run all tests
+bun run test                   # Run frontend + server integration tests
 pytest tests/test_query.py     # Run a single test file
 pytest -k "test_name"          # Run a single test by name
-frag-demo                      # Launch web UI (opens browser to localhost:5000)
+bun run dev                    # Launch the Bun + React app on localhost:5000
 ```
 
-Entry point: `frag-demo` starts a Flask dev server and opens the browser (defined in `pyproject.toml` → `frag_demo.app:main`).
+Entry point: `frag-demo` now launches the Bun runtime from the Python package, and `bun run dev` is the primary development entrypoint.
 
 ## Architecture & Data Flow
 
 ```
-Browser (localhost:5000)
-  ├── POST /api/load   → DemoAnalyzer → cache kills DataFrame + metadata
-  ├── POST /api/kills  → QueryEngine.query() → filtered kills JSON
-  ├── POST /api/record → SequenceBuilder → JSON file → CS2Launcher (bg thread)
-  ├── GET  /api/browse → tkinter file picker
-  └── GET  /api/status → check loaded state
+React client (localhost:5000)
+  ├── GET/POST /api/*      → Bun/Elysia server
+  ├── POST /api/load       → Python worker → DemoAnalyzer
+  ├── POST /api/kills      → Bun-side filtering
+  ├── POST /api/record     → Python worker → SequenceBuilder / CS2Launcher
+  ├── POST /api/encode     → Python worker → VideoEncoder
+  └── POST /api/upload     → FRAG-STAT import API
 ```
 
-Six modules in `src/frag_demo/`:
+Core modules:
 
-- **`app.py`** — Flask web app (replaces old CLI). Serves the single-page UI and JSON API endpoints. Caches parsed demo data in a module-level `_state` dict (single-user desktop tool). CS2 launch runs in a daemon thread to avoid blocking the HTTP response.
+- **`server/index.ts`** — Bun/Elysia backend. Owns UI state, watcher lifecycle, FRAG-STAT integration, and the browser-facing API.
+- **`web/src/App.tsx`** — React operator UI.
+- **`src/frag_demo/app.py`** — Thin Python launcher for the Bun app (`frag-demo` console script).
+- **`src/frag_demo/runtime.py`** — Shared helper functions used by the Python worker.
+- **`src/frag_demo/worker.py`** — Python subprocess bridge for demo parsing, sequence generation, clip cleanup, and encoding.
 - **`parser/demo_parser.py`** — `DemoAnalyzer` wraps demoparser2. `get_player_slots()` probes ticks 128→64→1 for entity IDs, falling back to kill events if tick data is unavailable.
 - **`query/engine.py`** — `QueryEngine` provides structured `query()` and free-form `parse_natural_query()`. The web UI uses `query()` directly with dropdown values. Weapon aliases resolve multi-weapon matches with pipe-separated format (e.g., `m4` → `m4a1|m4a1_silencer`).
 - **`sequences/builder.py`** — `SequenceBuilder` groups kills within 10 seconds into single sequences. Generates tick-keyed console commands with a setup/record/teardown structure. Uses Unix-style paths in MIRV commands even on Windows. Spectate command fallback: `spec_player {slot}` → `spec_lock_to_accountid` (32-bit from 64-bit SteamID via `& 0xFFFFFFFF`) → `spec_mode 1`. All ticks clamped to minimum 64.
 - **`launcher/cs2.py`** — `CS2Launcher` discovers HLAE/CS2 paths (registry, PATH, hardcoded candidates), manages plugin install/uninstall lifecycle with guaranteed cleanup in `finally`. Copies server.dll to both `bin/` and `bin/win64/` to satisfy CS2's dual search paths.
-- **`encoder/ffmpeg.py`** — `VideoEncoder` wraps ffmpeg for TGA→MP4 encoding and clip concatenation. Defined but not yet integrated into the workflow.
-
-Frontend files (no build step, vanilla HTML/JS/CSS):
-- `templates/index.html` — single-page UI layout
-- `static/app.js` — all frontend interactivity (API calls, table rendering, filter state, selection tracking)
-- `static/style.css` — dark theme styling
+- **`encoder/ffmpeg.py`** — `VideoEncoder` wraps ffmpeg for TGA→MP4 encoding and clip concatenation.
 
 ## Key Conventions
 

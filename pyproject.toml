@@ -9,7 +9,6 @@ description = "CS2 auto-broadcast replay creator"
 requires-python = ">=3.10"
 dependencies = [
     "demoparser2",
-    "flask",
     "numpy",
     "pandas",
 ]
