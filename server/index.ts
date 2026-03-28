@@ -232,7 +232,6 @@ function listDemoFiles(dirPath: string, recursive: boolean): string[] {
 
 async function buildLibraryPayload(): Promise<JsonRecord> {
   const uiState = await loadUiState();
-  await saveUiState(uiState);
 
   const foldersPayload: JsonRecord[] = [];
   const discovered = new Map<string, JsonRecord>();
