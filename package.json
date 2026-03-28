@@ -1,10 +1,10 @@
 {
   "name": "frag-demo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"PORT=5050 AUTO_OPEN_BROWSER=0 bun --watch server/index.ts\" \"bunx --bun vite --host 127.0.0.1 --port 5000 --strictPort\"",
+    "dev": "cross-env PORT=5050 AUTO_OPEN_BROWSER=0 concurrently \"bun --watch server/index.ts\" \"bunx --bun vite --host 127.0.0.1 --port 5000 --strictPort\"",
     "build:client": "bunx --bun vite build",
     "start": "bun run build:client && bun server/index.ts",
     "typecheck": "bunx --bun tsc --noEmit",
@@ -26,6 +26,7 @@
     "@vitejs/plugin-react": "^5.0.2",
     "bun-types": "^1.3.4",
     "concurrently": "^9.1.2",
+    "cross-env": "^10.0.0",
     "jsdom": "^26.1.0",
     "vite": "^7.1.5",
     "typescript": "^5.9.3",

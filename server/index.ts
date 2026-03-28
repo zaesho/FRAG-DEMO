@@ -356,7 +356,10 @@ function filterKills(kills: KillRecord[], filters: JsonRecord): KillRecord[] {
 function pythonExecutable(): string {
   const candidates = [
     process.env.PYTHON_PATH,
+    resolve(ROOT, ".venv/Scripts/python.exe"),
+    resolve(ROOT, ".venv/Scripts/python"),
     resolve(ROOT, ".venv/bin/python"),
+    "py",
     "python3",
     "python",
   ].filter((value): value is string => Boolean(value));
