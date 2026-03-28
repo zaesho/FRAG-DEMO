@@ -1073,17 +1073,19 @@ export async function shutdownRuntime(): Promise<void> {
 }
 
 if (import.meta.main) {
+  const host = process.env.HOST ?? "0.0.0.0";
   const port = Number(process.env.PORT ?? 5000);
-  app.listen(port);
+  app.listen({ hostname: host, port });
 
-  const url = `http://127.0.0.1:${port}`;
-  console.log(`[frag-demo] Node server running at ${url}`);
+  const localUrl = `http://127.0.0.1:${port}`;
+  const hostUrl = `http://${host}:${port}`;
+  console.log(`[frag-demo] Node server running at ${hostUrl} (local ${localUrl})`);
 
   if (process.env.AUTO_OPEN_BROWSER !== "0") {
     if (process.platform === "darwin") {
-      Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" });
+      Bun.spawn(["open", localUrl], { stdout: "ignore", stderr: "ignore" });
     } else if (process.platform === "win32") {
-      Bun.spawn(["cmd", "/c", "start", url], { stdout: "ignore", stderr: "ignore" });
+      Bun.spawn(["cmd", "/c", "start", localUrl], { stdout: "ignore", stderr: "ignore" });
     }
   }
 }
