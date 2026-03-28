@@ -162,12 +162,19 @@ class VideoEncoder:
             FileNotFoundError: If the ffmpeg binary cannot be found.
         """
         print(f"[frag-demo/ffmpeg] Running: {' '.join(args)}")
-        result = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "ffmpeg executable not found. Install FFmpeg and make sure "
+                "'ffmpeg' is on PATH. On Windows, run "
+                "'winget install --id=Gyan.FFmpeg -e' and restart the terminal."
+            ) from exc
         if result.returncode != 0:
             raise subprocess.CalledProcessError(
                 result.returncode,
