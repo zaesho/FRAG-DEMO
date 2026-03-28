@@ -109,6 +109,23 @@ function parseFloatValue(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function sanitizeForJson(value: unknown): unknown {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeForJson(item));
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+      key,
+      sanitizeForJson(item),
+    ]);
+    return Object.fromEntries(entries);
+  }
+  return String(value);
+}
+
 async function ensureStateDir(): Promise<void> {
   await mkdir(STATE_DIR, { recursive: true });
 }
@@ -873,7 +890,7 @@ export const app = new Elysia()
 
       return {
         ok: true,
-        header: runtime.loadedDemo.header,
+        header: sanitizeForJson(runtime.loadedDemo.header),
         total_kills: runtime.loadedDemo.totalKills,
         players: runtime.loadedDemo.players,
         weapons: runtime.loadedDemo.weapons,
@@ -891,8 +908,17 @@ export const app = new Elysia()
       return { ok: false, error: "No demo loaded." };
     }
 
-    const filtered = filterKills(runtime.loadedDemo.kills, (body ?? {}) as JsonRecord);
-    return { ok: true, total: filtered.length, kills: filtered };
+    try {
+      const filtered = filterKills(runtime.loadedDemo.kills, (body ?? {}) as JsonRecord);
+      return {
+        ok: true,
+        total: filtered.length,
+        kills: sanitizeForJson(filtered),
+      };
+    } catch (error) {
+      set.status = 500;
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   })
   .post("/api/record", async ({ body, set }) => {
     if (!runtime.loadedDemo) {
