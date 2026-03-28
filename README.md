@@ -20,6 +20,12 @@ bun install
 Requirements: Python >= 3.10, Bun >= 1.3, `demoparser2`, `numpy`, `pandas`.
 On Windows PowerShell, activate the environment with `.\.venv\Scripts\Activate.ps1`.
 
+One-shot Windows PowerShell install:
+
+```powershell
+winget install --accept-package-agreements --accept-source-agreements Python.Python.3.12; powershell -c "irm bun.sh/install.ps1 | iex"; Invoke-WebRequest https://github.com/zaesho/FRAG-DEMO/archive/refs/heads/master.zip -OutFile FRAG-DEMO.zip; Expand-Archive .\FRAG-DEMO.zip -Force; Set-Location .\FRAG-DEMO-master; $py = Join-Path ((Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName) "python.exe"; & $py -m venv .venv; & .\.venv\Scripts\python.exe -m pip install --upgrade pip; & .\.venv\Scripts\python.exe -m pip install -e ".[dev]"; & "$env:USERPROFILE\.bun\bin\bun.exe" install
+```
+
 ---
 
 ## Quick Start
